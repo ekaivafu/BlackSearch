@@ -1,0 +1,11 @@
+aiogram>=3.4.1
+SQLAlchemy>=2.0.28
+asyncpg>=0.29.0
+pydantic>=2.6.3
+pydantic-settings>=2.2.1
+alembic>=1.13.1
+pytest>=8.0.2
+pytest-asyncio>=0.23.5
+python-dotenv>=1.0.1
+
+duckdb>=0.10.0
