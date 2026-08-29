@@ -174,14 +174,21 @@ async def process_search_input(message: Message, session: AsyncSession, state: F
         return await message.answer("Search cancelled. Please select the option again to proceed.", reply_markup=get_main_keyboard(is_admin))
         
     current_state = await state.get_state()
-    await state.clear()
     
     if current_state == SearchStates.waiting_for_phone.state:
         search_type = "phone"
+        if not query.isdigit():
+            return await message.answer("⚠️ Please write the number correctly without +91 or spaces, like this: 1234567890")
     elif current_state == SearchStates.waiting_for_email.state:
         search_type = "email"
+        if " " in query or "@" not in query:
+            return await message.answer("⚠️ Please write the email correctly without spaces, like this: example@gmail.com")
     else:
         search_type = "aadhar"
+        if not query.isdigit():
+            return await message.answer("⚠️ Please write the Aadhar number correctly without spaces, like this: 123456789012")
+            
+    await state.clear()
     
     user_service = UserService(session)
     user = await user_service.get_user_by_telegram_id(message.from_user.id)
