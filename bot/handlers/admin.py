@@ -11,7 +11,7 @@ from aiogram.fsm.state import State, StatesGroup
 # pyrefly: ignore [missing-import]
 from aiogram.fsm.context import FSMContext
 from bot.services.user_service import UserService
-from bot.models.models import TransactionType, CreditTransaction, User
+from bot.models.models import TransactionType, CreditTransaction, User, RechargeStatus
 from bot.config import config
 from bot.keyboards.inline import get_recharge_approval_keyboard
 
