@@ -49,29 +49,36 @@ class OSINTService:
         """
         import re
         try:
-            # Run sherlock for max 20 seconds
+            # Run sherlock for max 60 seconds, read line by line to prevent buffering loss
+            env = os.environ.copy()
+            env["PYTHONUNBUFFERED"] = "1"
             process = await asyncio.create_subprocess_exec(
-                "sherlock", username, "--timeout", "3", "--print-found",
+                "sherlock", username, "--timeout", "1", "--print-found", "--no-color",
                 stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE
+                stderr=asyncio.subprocess.STDOUT,
+                env=env
             )
+            
+            results = []
+            ansi_escape = re.compile(r'\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])')
+            
+            async def read_lines():
+                while True:
+                    line = await process.stdout.readline()
+                    if not line:
+                        break
+                    line_str = line.decode('utf-8', errors='ignore')
+                    line_str = ansi_escape.sub('', line_str)
+                    matches = re.findall(r"\[\+\] (.*?):\s+(https?://[^\s]+)", line_str)
+                    for site, url in matches:
+                        results.append({"site": site.strip(), "url": url.strip()})
             
             # We don't want it to run forever and block the bot
             try:
-                stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=30.0)
+                await asyncio.wait_for(read_lines(), timeout=60.0)
             except asyncio.TimeoutError:
                 process.terminate()
-                stdout, stderr = await process.communicate()
-            
-            output = stdout.decode('utf-8')
-            
-            # Regex to match "[+] Site: https://..."
-            matches = re.findall(r"\[\+\] (.*?):\s+(https?://[^\s]+)", output)
-            
-            results = []
-            for site, url in matches:
-                results.append({"site": site.strip(), "url": url.strip()})
-                    
+                
             return sorted(results, key=lambda x: x["site"])
             
         except Exception as e:

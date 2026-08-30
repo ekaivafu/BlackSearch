@@ -26,7 +26,7 @@ class SearchService:
             
             if search_type == "username":
                 from bot.services.osint_service import OSINTService
-                osint_sites = await asyncio.wait_for(OSINTService.search_username_sherlock(query), timeout=45.0)
+                osint_sites = await asyncio.wait_for(OSINTService.search_username_sherlock(query), timeout=75.0)
                 data = {"count": 0, "results": []}
             else:
                 data_future = loop.run_in_executor(
