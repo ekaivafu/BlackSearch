@@ -199,16 +199,21 @@ async def process_search_input(message: Message, session: AsyncSession, state: F
     is_admin = message.from_user.id in config.admin_ids
     
     if not is_admin:
-        if user.credits < 1:
+        import datetime
+        now_utc = datetime.datetime.now(datetime.timezone.utc)
+        has_sub = user.subscription_end and user.subscription_end > now_utc
+        
+        if user.credits < 1 and not has_sub:
             return await message.answer(
                 "Your search credits are exhausted. Please request a recharge.",
                 reply_markup=get_recharge_request_keyboard()
             )
             
-        # Deduct credit
-        deducted = await user_service.deduct_credit(user.telegram_user_id, 1)
-        if not deducted:
-            return await message.answer("Failed to process credits. Please try again.")
+        if not has_sub:
+            # Deduct credit
+            deducted = await user_service.deduct_credit(user.telegram_user_id, 1)
+            if not deducted:
+                return await message.answer("Failed to process credits. Please try again.")
         
     global search_queue_count
     search_queue_count += 1
@@ -219,53 +224,52 @@ async def process_search_input(message: Message, session: AsyncSession, state: F
         else:
             wait_msg = None
 
-        async with search_lock:
-            if wait_msg:
-                try:
-                    await wait_msg.edit_text("⏳ <b>Now processing your search, please wait...</b>\n<i>(This can take 1-2 minutes on our free server)</i>\n<code>[          ]</code>", parse_mode="HTML")
-                except Exception:
-                    pass
-            else:
-                wait_msg = await message.answer("⏳ <b>Searching our database, please wait...</b>\n<i>(This can take 1-2 minutes on our free server)</i>\n<code>[          ]</code>", parse_mode="HTML")
-            
-            search_service = SearchService(session)
-            search_task = asyncio.create_task(search_service.search(user, query=query, search_type=search_type))
-            
-            frames = [
-                "[=         ]",
-                "[==        ]",
-                "[===       ]",
-                "[====      ]",
-                "[=====     ]",
-                "[======    ]",
-                "[=======   ]",
-                "[========  ]",
-                "[========= ]",
-                "[==========]"
-            ]
-            frame_idx = 0
-            
-            # Animate loading bar while search is running
-            while not search_task.done():
-                for _ in range(8): # check every 0.1s for 0.8s total before updating frame
-                    if search_task.done():
-                        break
-                    await asyncio.sleep(0.1)
-                    
-                if not search_task.done():
-                    frame_idx = (frame_idx + 1) % len(frames)
-                    try:
-                        await wait_msg.edit_text(f"⏳ <b>Searching our database, please wait...</b>\n<i>(This can take 1-2 minutes on our free server)</i>\n<code>{frames[frame_idx]}</code>", parse_mode="HTML")
-                    except Exception:
-                        pass
-                        
-            result = search_task.result()
-            
-            # Delete waiting message
+        if wait_msg:
             try:
-                await wait_msg.delete()
+                await wait_msg.edit_text("⏳ <b>Now processing your search, please wait...</b>\n<i>(This can take 1-2 minutes on our free server)</i>\n<code>[          ]</code>", parse_mode="HTML")
             except Exception:
                 pass
+        else:
+            wait_msg = await message.answer("⏳ <b>Searching our database, please wait...</b>\n<i>(This can take 1-2 minutes on our free server)</i>\n<code>[          ]</code>", parse_mode="HTML")
+        
+        search_service = SearchService(session)
+        search_task = asyncio.create_task(search_service.search(user, query=query, search_type=search_type))
+        
+        frames = [
+            "[=         ]",
+            "[==        ]",
+            "[===       ]",
+            "[====      ]",
+            "[=====     ]",
+            "[======    ]",
+            "[=======   ]",
+            "[========  ]",
+            "[========= ]",
+            "[==========]"
+        ]
+        frame_idx = 0
+        
+        # Animate loading bar while search is running
+        while not search_task.done():
+            for _ in range(25): # check every 0.1s for 2.5s total before updating frame
+                if search_task.done():
+                    break
+                await asyncio.sleep(0.1)
+                
+            if not search_task.done():
+                frame_idx = (frame_idx + 1) % len(frames)
+                try:
+                    await wait_msg.edit_text(f"⏳ <b>Searching our database, please wait...</b>\n<i>(This can take 1-2 minutes on our free server)</i>\n<code>{frames[frame_idx]}</code>", parse_mode="HTML")
+                except Exception:
+                    pass
+                    
+        result = search_task.result()
+        
+        # Delete waiting message
+        try:
+            await wait_msg.delete()
+        except Exception:
+            pass
     finally:
         search_queue_count -= 1
     
