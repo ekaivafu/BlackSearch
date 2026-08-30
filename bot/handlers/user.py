@@ -247,6 +247,16 @@ async def process_search_input(message: Message, session: AsyncSession, state: F
             "[========= ]",
             "[==========]"
         ]
+        
+        animation_texts = [
+            "⏳ <b>Searching Personal Database...</b>",
+            "⏳ <b>Scanning 120+ Social Media Sites...</b>",
+            "⏳ <b>Checking Linked Accounts...</b>",
+            "⏳ <b>Cross-referencing Open Source data...</b>"
+        ] if search_type == "email" else [
+            "⏳ <b>Searching our database, please wait...</b>\n<i>(This can take 1-2 minutes on our free server)</i>"
+        ]
+        
         frame_idx = 0
         
         # Animate loading bar while search is running
@@ -258,8 +268,11 @@ async def process_search_input(message: Message, session: AsyncSession, state: F
                 
             if not search_task.done():
                 frame_idx = (frame_idx + 1) % len(frames)
+                text_idx = frame_idx % len(animation_texts)
+                msg_text = animation_texts[text_idx]
+                
                 try:
-                    await wait_msg.edit_text(f"⏳ <b>Searching our database, please wait...</b>\n<i>(This can take 1-2 minutes on our free server)</i>\n<code>{frames[frame_idx]}</code>", parse_mode="HTML")
+                    await wait_msg.edit_text(f"{msg_text}\n<code>{frames[frame_idx]}</code>", parse_mode="HTML")
                 except Exception:
                     pass
                     

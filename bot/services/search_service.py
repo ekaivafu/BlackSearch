@@ -29,19 +29,44 @@ class SearchService:
                 search_type, 
                 query
             )
-            data = await asyncio.wait_for(data_future, timeout=300.0)
-            duration = round(time.time() - start_time, 2)
-            is_success = bool(data.get("count", 0))
             
-            if is_success:
-                results_text = f"🔍 <b>Query:</b> <code>{query}</code>  |  <b>Found:</b> {data['count']} results  |  ⏱️ <b>Time:</b> {duration}s\n\n"
+            # Check OSINT concurrently if it's an email
+            if search_type == "email":
+                from bot.services.osint_service import OSINTService
+                osint_future = asyncio.create_task(OSINTService.check_email_holehe(query))
+                data, osint_sites = await asyncio.gather(
+                    asyncio.wait_for(data_future, timeout=300.0),
+                    asyncio.wait_for(osint_future, timeout=30.0)
+                )
+            else:
+                data = await asyncio.wait_for(data_future, timeout=300.0)
+                osint_sites = []
+                
+            duration = round(time.time() - start_time, 2)
+            is_success = bool(data.get("count", 0)) or bool(osint_sites)
+            
+            # Format Database Results
+            if data.get("count", 0):
+                results_text = f"🔍 <b>Query:</b> <code>{query}</code>  |  <b>Found:</b> {data['count']} DB results  |  ⏱️ <b>Time:</b> {duration}s\n\n"
+                results_text += "<b>--- Personal Details ---</b>\n\n"
                 for i, row in enumerate(data["results"], 1):
                     results_text += f"<b>--- Record {i} ---</b>\n"
                     results_text += duckdb_service.format_result(row) + "\n\n"
-                mock_result = results_text
             else:
-                mock_result = f"🔍 <b>Query:</b> <code>{query}</code>  |  ⏱️ <b>Time:</b> {duration}s\n❌ <b>No data found.</b>"
+                results_text = f"🔍 <b>Query:</b> <code>{query}</code>  |  ⏱️ <b>Time:</b> {duration}s\n\n<b>--- Personal Details ---</b>\n❌ No data found in database.\n\n"
                 
+            # Format OSINT Results
+            if search_type == "email":
+                results_text += "<b>--- OSINT Linked Sites ---</b>\n"
+                if osint_sites:
+                    results_text += f"🔗 <b>Found {len(osint_sites)} connected accounts!</b>\n"
+                    for site in osint_sites:
+                        results_text += f"🟢 {site}\n"
+                else:
+                    results_text += "❌ No linked accounts found.\n"
+                    
+            mock_result = results_text.strip()
+            
         except asyncio.TimeoutError:
             logger.error(f"Search timed out for {query}")
             is_success = False
