@@ -169,10 +169,10 @@ async def btn_how_to_use(message: Message):
     text = (
         "🕵️‍♂️ **Welcome to the BlackSearch OSINT Guide!**\n"
         "Here is how to use the powerful tools at your disposal:\n\n"
-        "📱 **Number Info:** Enter any 10-digit phone number. The bot will cross-reference our 227 GB private database and live Truecaller records to fetch names, addresses, and connected numbers!\n\n"
+        "📱 **Number Info:** Enter any 10-digit phone number. The bot will cross-reference our private database and live Truecaller records to fetch names, addresses, and connected numbers!\n\n"
         "🪪 **Aadhar Info:** Enter a 12-digit Aadhar number to pull up deeply connected personal details from leaked governmental databases.\n\n"
         "📧 **Email Info:** Enter an email address. The bot will search for personal details AND stealthily ping 120+ social media sites to find active accounts linked to that email!\n\n"
-        "👤 **Username Info:** Enter a gamer tag or username. We deploy the Sherlock engine to scan over 400 platforms across the entire internet to find every single profile matching that name!\n\n"
+        "👤 **Username Info:** Enter a gamer tag or username. We deploy our advanced intelligence engine to scan over 400 platforms across the entire internet to find every single profile matching that name!\n\n"
         "💳 **Request Recharge:** Run out of credits? Hit this to purchase a 1-day or 7-day Unlimited Plan from the Admin!"
     )
     await message.answer(text, parse_mode="Markdown")
@@ -254,11 +254,11 @@ async def process_search_input(message: Message, session: AsyncSession, state: F
 
         if wait_msg:
             try:
-                await wait_msg.edit_text("⏳ <b>Now processing your search, please wait...</b>\n<i>(This can take 1-2 minutes on our free server)</i>\n<code>[          ]</code>", parse_mode="HTML")
+                await wait_msg.edit_text("⏳ <b>Now processing your search, please wait...</b>\n<code>[          ]</code>", parse_mode="HTML")
             except Exception:
                 pass
         else:
-            wait_msg = await message.answer("⏳ <b>Searching our database, please wait...</b>\n<i>(This can take 1-2 minutes on our free server)</i>\n<code>[          ]</code>", parse_mode="HTML")
+            wait_msg = await message.answer("⏳ <b>Querying Global Database, please wait...</b>\n<code>[          ]</code>", parse_mode="HTML")
         
         search_service = SearchService(session)
         search_task = asyncio.create_task(search_service.search(user, query=query, search_type=search_type))
@@ -285,14 +285,14 @@ async def process_search_input(message: Message, session: AsyncSession, state: F
             ]
         elif search_type == "username":
             animation_texts = [
-                "⏳ <b>Deploying Sherlock Engine...</b>",
+                "⏳ <b>Initializing OSINT Engine...</b>",
                 "⏳ <b>Scanning 400+ Social Media Platforms...</b>",
                 "⏳ <b>Extracting Active Profiles...</b>",
                 "⏳ <b>Cross-referencing Open Source data...</b>"
             ]
         else:
             animation_texts = [
-                "⏳ <b>Searching our database, please wait...</b>\n<i>(This can take 1-2 minutes on our free server)</i>"
+                "⏳ <b>Querying Global Database, please wait...</b>"
             ]
         
         frame_idx = 0

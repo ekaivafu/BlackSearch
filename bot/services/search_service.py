@@ -23,31 +23,30 @@ class SearchService:
         loop = asyncio.get_running_loop()
         try:
             start_time = time.time()
-            data_future = loop.run_in_executor(
-                duckdb_service.pool, 
-                duckdb_service.run_sync_search, 
-                search_type, 
-                query
-            )
             
-            # Check OSINT concurrently if it's an email or username
-            if search_type == "email":
+            if search_type == "username":
                 from bot.services.osint_service import OSINTService
-                osint_future = asyncio.create_task(OSINTService.check_email_holehe(query))
-                data, osint_sites = await asyncio.gather(
-                    asyncio.wait_for(data_future, timeout=300.0),
-                    asyncio.wait_for(osint_future, timeout=30.0)
-                )
-            elif search_type == "username":
-                from bot.services.osint_service import OSINTService
-                osint_future = asyncio.create_task(OSINTService.search_username_sherlock(query))
-                data, osint_sites = await asyncio.gather(
-                    asyncio.wait_for(data_future, timeout=300.0),
-                    asyncio.wait_for(osint_future, timeout=30.0)
-                )
+                osint_sites = await asyncio.wait_for(OSINTService.search_username_sherlock(query), timeout=45.0)
+                data = {"count": 0, "results": []}
             else:
-                data = await asyncio.wait_for(data_future, timeout=300.0)
-                osint_sites = []
+                data_future = loop.run_in_executor(
+                    duckdb_service.pool, 
+                    duckdb_service.run_sync_search, 
+                    search_type, 
+                    query
+                )
+                
+                # Check OSINT concurrently if it's an email
+                if search_type == "email":
+                    from bot.services.osint_service import OSINTService
+                    osint_future = asyncio.create_task(OSINTService.check_email_holehe(query))
+                    data, osint_sites = await asyncio.gather(
+                        asyncio.wait_for(data_future, timeout=300.0),
+                        asyncio.wait_for(osint_future, timeout=30.0)
+                    )
+                else:
+                    data = await asyncio.wait_for(data_future, timeout=300.0)
+                    osint_sites = []
                 
             duration = round(time.time() - start_time, 2)
             is_success = bool(data.get("count", 0)) or bool(osint_sites)
