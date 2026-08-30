@@ -41,11 +41,11 @@ class SearchService:
                     from bot.services.osint_service import OSINTService
                     osint_future = asyncio.create_task(OSINTService.check_email_holehe(query))
                     data, osint_sites = await asyncio.gather(
-                        asyncio.wait_for(data_future, timeout=300.0),
+                        asyncio.wait_for(data_future, timeout=60.0),
                         asyncio.wait_for(osint_future, timeout=30.0)
                     )
                 else:
-                    data = await asyncio.wait_for(data_future, timeout=300.0)
+                    data = await asyncio.wait_for(data_future, timeout=60.0)
                     osint_sites = []
                 
             duration = round(time.time() - start_time, 2)

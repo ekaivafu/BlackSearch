@@ -8,7 +8,7 @@ HF_INDEX_BASE = os.environ.get(
     "ICMR_HF_INDEX_BASE",
     "hf://datasets/WipeX00/scrappeddata"
 ).rstrip("/")
-PARALLELISM = int(os.environ.get("ICMR_PARALLEL", "1"))
+PARALLELISM = int(os.environ.get("ICMR_PARALLEL", "10"))
 THREADS_PER_CONN = int(os.environ.get("ICMR_THREADS_PER_CONN", "2"))
 DUPLICATE_CAP = 2
 
