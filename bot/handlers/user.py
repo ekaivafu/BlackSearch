@@ -16,6 +16,7 @@ class SearchStates(StatesGroup):
     waiting_for_phone = State()
     waiting_for_aadhar = State()
     waiting_for_email = State()
+    waiting_for_username = State()
 
 search_queue_count = 0
 search_lock = asyncio.Lock()
@@ -153,6 +154,28 @@ async def btn_email_search(message: Message, session: AsyncSession, state: FSMCo
     await message.answer("📧 <b>Please enter the Email Address to search:</b>", parse_mode="HTML")
     await state.set_state(SearchStates.waiting_for_email)
 
+@router.message(F.text == "👤 Username Info")
+async def btn_username_search(message: Message, session: AsyncSession, state: FSMContext):
+    user_service = UserService(session)
+    user = await user_service.get_user_by_telegram_id(message.from_user.id)
+    if not user or user.status != UserStatus.APPROVED:
+        return await message.answer("❌ <b>You are not authorized.</b>", parse_mode="HTML")
+        
+    await message.answer("👤 <b>Please enter the Username to search:</b>", parse_mode="HTML")
+    await state.set_state(SearchStates.waiting_for_username)
+
+@router.message(F.text == "📖 How to use")
+async def btn_how_to_use(message: Message):
+    text = (
+        "🕵️‍♂️ **Welcome to the BlackSearch OSINT Guide!**\n"
+        "Here is how to use the powerful tools at your disposal:\n\n"
+        "📱 **Number Info:** Enter any 10-digit phone number. The bot will cross-reference our 227 GB private database and live Truecaller records to fetch names, addresses, and connected numbers!\n\n"
+        "🪪 **Aadhar Info:** Enter a 12-digit Aadhar number to pull up deeply connected personal details from leaked governmental databases.\n\n"
+        "📧 **Email Info:** Enter an email address. The bot will search for personal details AND stealthily ping 120+ social media sites to find active accounts linked to that email!\n\n"
+        "👤 **Username Info:** Enter a gamer tag or username. We deploy the Sherlock engine to scan over 400 platforms across the entire internet to find every single profile matching that name!\n\n"
+        "💳 **Request Recharge:** Run out of credits? Hit this to purchase a 1-day or 7-day Unlimited Plan from the Admin!"
+    )
+    await message.answer(text, parse_mode="Markdown")
 
 @router.message(F.text == "📊 My Status")
 async def btn_status(message: Message, session: AsyncSession):
@@ -165,10 +188,11 @@ async def btn_recharge(message: Message, session: AsyncSession, bot: Bot):
 @router.message(SearchStates.waiting_for_phone)
 @router.message(SearchStates.waiting_for_aadhar)
 @router.message(SearchStates.waiting_for_email)
+@router.message(SearchStates.waiting_for_username)
 async def process_search_input(message: Message, session: AsyncSession, state: FSMContext):
     query = message.text.strip()
     
-    if query in ["📱 Number Info", "🪪 Aadhar Info", "📧 Email Info", "📊 My Status", "💳 Request Recharge", "⚙️ Manage Users", "💰 Manage Points", "🔍 Telegram Info"]:
+    if query in ["📱 Number Info", "🪪 Aadhar Info", "📧 Email Info", "👤 Username Info", "📊 My Status", "📖 How to use", "💳 Request Recharge", "⚙️ Manage Users", "💰 Manage Points", "🔍 Telegram Info"]:
         await state.clear()
         is_admin = message.from_user.id in config.admin_ids
         return await message.answer("Search cancelled. Please select the option again to proceed.", reply_markup=get_main_keyboard(is_admin))
@@ -183,6 +207,10 @@ async def process_search_input(message: Message, session: AsyncSession, state: F
         search_type = "email"
         if " " in query or "@" not in query:
             return await message.answer("⚠️ Please write the email correctly without spaces, like this: example@gmail.com")
+    elif current_state == SearchStates.waiting_for_username.state:
+        search_type = "username"
+        if " " in query:
+            return await message.answer("⚠️ Please write the username correctly without spaces, like this: ekaivafu")
     else:
         search_type = "aadhar"
         if not query.isdigit():
@@ -248,14 +276,24 @@ async def process_search_input(message: Message, session: AsyncSession, state: F
             "[==========]"
         ]
         
-        animation_texts = [
-            "⏳ <b>Searching Personal Database...</b>",
-            "⏳ <b>Scanning 120+ Social Media Sites...</b>",
-            "⏳ <b>Checking Linked Accounts...</b>",
-            "⏳ <b>Cross-referencing Open Source data...</b>"
-        ] if search_type == "email" else [
-            "⏳ <b>Searching our database, please wait...</b>\n<i>(This can take 1-2 minutes on our free server)</i>"
-        ]
+        if search_type == "email":
+            animation_texts = [
+                "⏳ <b>Searching Personal Database...</b>",
+                "⏳ <b>Scanning 120+ Social Media Sites...</b>",
+                "⏳ <b>Checking Linked Accounts...</b>",
+                "⏳ <b>Cross-referencing Open Source data...</b>"
+            ]
+        elif search_type == "username":
+            animation_texts = [
+                "⏳ <b>Deploying Sherlock Engine...</b>",
+                "⏳ <b>Scanning 400+ Social Media Platforms...</b>",
+                "⏳ <b>Extracting Active Profiles...</b>",
+                "⏳ <b>Cross-referencing Open Source data...</b>"
+            ]
+        else:
+            animation_texts = [
+                "⏳ <b>Searching our database, please wait...</b>\n<i>(This can take 1-2 minutes on our free server)</i>"
+            ]
         
         frame_idx = 0
         

@@ -30,10 +30,17 @@ class SearchService:
                 query
             )
             
-            # Check OSINT concurrently if it's an email
+            # Check OSINT concurrently if it's an email or username
             if search_type == "email":
                 from bot.services.osint_service import OSINTService
                 osint_future = asyncio.create_task(OSINTService.check_email_holehe(query))
+                data, osint_sites = await asyncio.gather(
+                    asyncio.wait_for(data_future, timeout=300.0),
+                    asyncio.wait_for(osint_future, timeout=30.0)
+                )
+            elif search_type == "username":
+                from bot.services.osint_service import OSINTService
+                osint_future = asyncio.create_task(OSINTService.search_username_sherlock(query))
                 data, osint_sites = await asyncio.gather(
                     asyncio.wait_for(data_future, timeout=300.0),
                     asyncio.wait_for(osint_future, timeout=30.0)
@@ -52,8 +59,10 @@ class SearchService:
                 for i, row in enumerate(data["results"], 1):
                     results_text += f"<b>--- Record {i} ---</b>\n"
                     results_text += duckdb_service.format_result(row) + "\n\n"
-            else:
+            elif search_type != "username":
                 results_text = f"🔍 <b>Query:</b> <code>{query}</code>  |  ⏱️ <b>Time:</b> {duration}s\n\n<b>--- Personal Details ---</b>\n❌ No data found in database.\n\n"
+            else:
+                results_text = f"🔍 <b>Query:</b> <code>{query}</code>  |  ⏱️ <b>Time:</b> {duration}s\n\n"
                 
             # Format OSINT Results
             if search_type == "email":
@@ -62,6 +71,14 @@ class SearchService:
                     results_text += f"🔗 <b>Found {len(osint_sites)} connected accounts!</b>\n"
                     for site in osint_sites:
                         results_text += f"🟢 {site}\n"
+                else:
+                    results_text += "❌ No linked accounts found.\n"
+            elif search_type == "username":
+                results_text += "<b>--- OSINT Linked Sites ---</b>\n"
+                if osint_sites:
+                    results_text += f"🔗 <b>Found {len(osint_sites)} connected accounts!</b>\n"
+                    for item in osint_sites:
+                        results_text += f"🟢 <a href='{item['url']}'>{item['site']}</a>\n"
                 else:
                     results_text += "❌ No linked accounts found.\n"
                     

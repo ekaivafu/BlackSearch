@@ -40,3 +40,40 @@ class OSINTService:
         except Exception as e:
             print(f"Holehe OSINT Error: {e}")
             return []
+
+    @staticmethod
+    async def search_username_sherlock(username: str) -> list[dict]:
+        """
+        Runs sherlock as a subprocess to find active username profiles.
+        Returns a list of dicts with 'site' and 'url'.
+        """
+        import re
+        try:
+            # Run sherlock for max 20 seconds
+            process = await asyncio.create_subprocess_exec(
+                "sherlock", username, "--timeout", "3", "--print-found",
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE
+            )
+            
+            # We don't want it to run forever and block the bot
+            try:
+                stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=30.0)
+            except asyncio.TimeoutError:
+                process.terminate()
+                stdout, stderr = await process.communicate()
+            
+            output = stdout.decode('utf-8')
+            
+            # Regex to match "[+] Site: https://..."
+            matches = re.findall(r"\[\+\] (.*?):\s+(https?://[^\s]+)", output)
+            
+            results = []
+            for site, url in matches:
+                results.append({"site": site.strip(), "url": url.strip()})
+                    
+            return sorted(results, key=lambda x: x["site"])
+            
+        except Exception as e:
+            print(f"Sherlock OSINT Error: {e}")
+            return []
