@@ -208,7 +208,10 @@ def run_sync_search(search_type: str, query: str, limit: int = 10) -> dict:
     if search_type == "phone":
         main_data = _run_field_search("phoneNumber", q, "exact", limit)
         tc_res = _run_truecaller_search("phoneNumber", q, limit)
-        ind_res = _run_inddata_search("phoneNumber", q, limit)
+        
+        # Disabled Inddata search because querying a 93GB unpartitioned remote file crashes/freezes 512MB Render instances
+        # ind_res = _run_inddata_search("phoneNumber", q, limit)
+        ind_res = []
         
         # Enrich main_data with Truecaller info if available
         if tc_res and main_data["results"]:
@@ -235,7 +238,9 @@ def run_sync_search(search_type: str, query: str, limit: int = 10) -> dict:
         
     elif search_type == "email":
         tc_res = _run_truecaller_search("email", q, limit)
-        ind_res = _run_inddata_search("email", q, limit)
+        # Disabled due to 93GB file freezing the bot
+        # ind_res = _run_inddata_search("email", q, limit)
+        ind_res = []
         
         main_data = {"count": 0, "results": []}
         
