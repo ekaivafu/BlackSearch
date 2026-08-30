@@ -33,6 +33,12 @@ TRUECALLER_INDEXES = {
     "email": f"{TC_INDEX_BASE}/idx_email.parquet"
 }
 
+INDDATA_HF_BASE = os.environ.get(
+    "INDDATA_HF_INDEX_BASE",
+    "hf://datasets/eKaiva/Inddatainonefile"
+).rstrip("/")
+INDDATA_INDEX = f"{INDDATA_HF_BASE}/users_data.parquet"
+
 # ── DuckDB Global Connection ──────────────────────────────────────────────────
 _global_conn = None
 _conn_lock = threading.Lock()
@@ -60,10 +66,11 @@ def _get_conn() -> duckdb.DuckDBPyConnection:
         
         # Enable HTTP metadata caching to drastically improve remote query speed
         con.execute("SET enable_http_metadata_cache=true;")
-        con.execute("SET enable_object_cache=true;")
+        # Disabled object cache because caching 100GB parquet file metadata causes OOM on 512MB Render instances
+        con.execute("SET enable_object_cache=false;")
         
-        # Restrict memory for Render Free Tier (512MB max)
-        con.execute("SET memory_limit='300MB';")
+        # Restrict memory strictly for Render Free Tier (512MB max total for python + duckdb)
+        con.execute("SET memory_limit='100MB';")
         con.execute("SET preserve_insertion_order=false;")
         
         hf_token = os.environ.get("HF_TOKEN", "")
@@ -160,12 +167,50 @@ def _run_truecaller_search(field: str, value: str, limit: int = 10) -> list[dict
         print(f"Truecaller search error: {e}")
         return []
 
+def _run_inddata_search(field: str, value: str, limit: int = 10) -> list[dict]:
+    if field == "phoneNumber":
+        query_field = "mobile"
+    elif field == "email":
+        query_field = "email"
+    else:
+        return []
+    
+    v = str(value).replace("'", "''")
+    # Columns in parquet: mobile, name, fname, address, alt, circle, id, email
+    sql = f"SELECT * FROM read_parquet('{INDDATA_INDEX}') WHERE {query_field} = '{v}' LIMIT {limit}"
+    
+    con = _get_conn()
+    try:
+        rows = con.execute(sql).fetchall()
+        cols = [d[0] for d in con.description]
+        raw_results = [dict(zip(cols, r)) for r in rows]
+        
+        # Map to standard schema
+        mapped_results = []
+        for row in raw_results:
+            mapped_results.append({
+                "name": row.get("name"),
+                "fathersName": row.get("fname"),
+                "phoneNumber": row.get("mobile"),
+                "otherNumber": row.get("alt"),
+                "address": row.get("address"),
+                "state": row.get("circle"),
+                "Email": row.get("email"),
+                "source": "Inddata (1B)"
+            })
+        return mapped_results
+    except Exception as e:
+        print(f"Inddata search error: {e}")
+        return []
+
 def run_sync_search(search_type: str, query: str, limit: int = 10) -> dict:
     q = query.strip()
     if search_type == "phone":
         main_data = _run_field_search("phoneNumber", q, "exact", limit)
         tc_res = _run_truecaller_search("phoneNumber", q, limit)
+        ind_res = _run_inddata_search("phoneNumber", q, limit)
         
+        # Enrich main_data with Truecaller info if available
         if tc_res and main_data["results"]:
             tc_row = tc_res[0]
             for r in main_data["results"]:
@@ -174,8 +219,14 @@ def run_sync_search(search_type: str, query: str, limit: int = 10) -> dict:
                 r["Gender"] = tc_row.get("Gender")
                 r["Truecaller_Name"] = tc_row.get("Name")
         elif not main_data["results"] and tc_res:
-            main_data["count"] = len(tc_res)
             main_data["results"] = tc_res
+            
+        # Append Inddata results
+        if ind_res:
+            main_data["results"].extend(ind_res)
+            
+        # Update total count
+        main_data["count"] = len(main_data["results"])
             
         return main_data
         
@@ -184,26 +235,31 @@ def run_sync_search(search_type: str, query: str, limit: int = 10) -> dict:
         
     elif search_type == "email":
         tc_res = _run_truecaller_search("email", q, limit)
-        if not tc_res:
-            return {"count": 0, "results": []}
-            
-        phone = tc_res[0].get("Number")
-        if not phone:
-            return {"count": len(tc_res), "results": tc_res}
-            
-        main_data = _run_field_search("phoneNumber", phone, "exact", limit)
-        tc_row = tc_res[0]
+        ind_res = _run_inddata_search("email", q, limit)
         
-        if main_data["results"]:
-            for r in main_data["results"]:
-                r["Email"] = tc_row.get("Email")
-                r["Carrier"] = tc_row.get("Carrier")
-                r["Gender"] = tc_row.get("Gender")
-                r["Truecaller_Name"] = tc_row.get("Name")
-        else:
-            main_data["count"] = len(tc_res)
-            main_data["results"] = tc_res
+        main_data = {"count": 0, "results": []}
+        
+        if tc_res:
+            phone = tc_res[0].get("Number")
+            if phone:
+                main_data = _run_field_search("phoneNumber", phone, "exact", limit)
+                tc_row = tc_res[0]
+                if main_data["results"]:
+                    for r in main_data["results"]:
+                        r["Email"] = tc_row.get("Email")
+                        r["Carrier"] = tc_row.get("Carrier")
+                        r["Gender"] = tc_row.get("Gender")
+                        r["Truecaller_Name"] = tc_row.get("Name")
+                else:
+                    main_data["results"] = tc_res
+            else:
+                main_data["results"] = tc_res
+                
+        # Append Inddata results for email
+        if ind_res:
+            main_data["results"].extend(ind_res)
             
+        main_data["count"] = len(main_data["results"])
         return main_data
         
     return {"count": 0, "results": []}
