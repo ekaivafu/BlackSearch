@@ -62,6 +62,10 @@ def _get_conn() -> duckdb.DuckDBPyConnection:
         con.execute("SET enable_http_metadata_cache=true;")
         con.execute("SET enable_object_cache=true;")
         
+        # Restrict memory for Render Free Tier (512MB max)
+        con.execute("SET memory_limit='300MB';")
+        con.execute("SET preserve_insertion_order=false;")
+        
         hf_token = os.environ.get("HF_TOKEN", "")
         if hf_token:
             try:
