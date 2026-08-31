@@ -133,8 +133,9 @@ def _run_field_search(field: str, value: str, mode: str, limit: int = 10) -> dic
         raise ValueError(f"Unknown mode: {mode}")
 
     con = _get_conn()
-    rows = con.execute(sql, [value]).fetchall()
-    cols = [d[0] for d in con.description]
+    cursor = con.cursor()
+    rows = cursor.execute(sql, [value]).fetchall()
+    cols = [d[0] for d in cursor.description]
     results = _cap_duplicates([dict(zip(cols, r)) for r in rows])[:limit]
     return {"field": field, "value": value, "mode": mode, "count": len(results), "results": results}
 
@@ -153,9 +154,10 @@ def _run_truecaller_search(field: str, value: str, limit: int = 10) -> list[dict
     sql = f"SELECT {cols} FROM read_parquet('{dataset_path}') WHERE {query_field} = '{v}' LIMIT {limit}"
     
     con = _get_conn()
+    cursor = con.cursor()
     try:
-        rows = con.execute(sql).fetchall()
-        cols = [d[0] for d in con.description]
+        rows = cursor.execute(sql).fetchall()
+        cols = [d[0] for d in cursor.description]
         return [dict(zip(cols, r)) for r in rows]
     except Exception as e:
         print(f"Truecaller search error: {e}")
@@ -188,14 +190,15 @@ def _run_inddata_search(field: str, value: str, limit: int = 10) -> list[dict]:
     
     v = str(value).replace("'", "''")
     con = _get_conn()
+    cursor = con.cursor()
     
     # 🚀 Since we are now using MotherDuck, we don't need to batch the queries!
     # MotherDuck's 64GB+ cloud servers can easily handle searching all 120 files at the exact same time without freezing!
     sql = f"SELECT * FROM read_parquet('{INDDATA_INDEX}') WHERE {query_field} = '{v}' LIMIT {limit}"
     
     try:
-        rows = con.execute(sql).fetchall()
-        cols = [d[0] for d in con.description]
+        rows = cursor.execute(sql).fetchall()
+        cols = [d[0] for d in cursor.description]
         raw_results = [dict(zip(cols, r)) for r in rows]
         
         mapped_results = []
@@ -221,8 +224,11 @@ def run_sync_search(search_type: str, query: str, limit: int = 10) -> dict:
         main_data = _run_field_search("phoneNumber", q, "exact", limit)
         tc_res = _run_truecaller_search("phoneNumber", q, limit)
         
-        # Query the newly chunked 120-file Inddata database!
-        ind_res = _run_inddata_search("phoneNumber", q, limit)
+        # Calculate remaining limit
+        rem_limit = limit - len(main_data["results"])
+        ind_res = []
+        if rem_limit > 0:
+            ind_res = _run_inddata_search("phoneNumber", q, rem_limit)
         
         # Enrich main_data with Truecaller info if available
         if tc_res and main_data["results"]:
@@ -234,7 +240,7 @@ def run_sync_search(search_type: str, query: str, limit: int = 10) -> dict:
                 r["Truecaller_Name"] = tc_row.get("Name")
         elif not main_data["results"] and tc_res:
             main_data["results"] = tc_res
-            
+        
         # Append Inddata results
         if ind_res:
             main_data["results"].extend(ind_res)
@@ -249,9 +255,6 @@ def run_sync_search(search_type: str, query: str, limit: int = 10) -> dict:
         
     elif search_type == "email":
         tc_res = _run_truecaller_search("email", q, limit)
-        # Query the newly chunked 120-file Inddata database!
-        ind_res = _run_inddata_search("email", q, limit)
-        
         main_data = {"count": 0, "results": []}
         
         if tc_res:
@@ -271,8 +274,11 @@ def run_sync_search(search_type: str, query: str, limit: int = 10) -> dict:
                 main_data["results"] = tc_res
                 
         # Append Inddata results for email
-        if ind_res:
-            main_data["results"].extend(ind_res)
+        rem_limit = limit - len(main_data["results"])
+        if rem_limit > 0:
+            ind_res = _run_inddata_search("email", q, rem_limit)
+            if ind_res:
+                main_data["results"].extend(ind_res[:rem_limit])
             
         main_data["count"] = len(main_data["results"])
         return main_data
