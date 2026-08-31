@@ -72,21 +72,9 @@ def _get_conn():
             _global_conn = con
             print("✅ MotherDuck successfully connected!")
         except Exception as e:
-            print(f"❌ MotherDuck connection failed: {e}. Falling back to local DuckDB.")
-            con = duckdb.connect()
-            con.execute("INSTALL parquet; LOAD parquet;")
-            con.execute("INSTALL httpfs; LOAD httpfs;")
-            con.execute("SET enable_http_metadata_cache=true;")
-            con.execute("SET enable_object_cache=false;")
-            con.execute("SET memory_limit='100MB';")
-            
-            hf_token = os.environ.get("HF_TOKEN", "")
-            if hf_token:
-                try:
-                    con.execute(f"CREATE OR REPLACE SECRET hf_secret (TYPE HUGGINGFACE, TOKEN '{hf_token}');")
-                except Exception as ex:
-                    pass
-            _global_conn = con
+            print(f"❌ FATAL ERROR: MotherDuck connection failed: {e}.")
+            print("We are completely disabling local DuckDB fallback to protect Render's 512MB RAM from crashing on the 93GB dataset.")
+            raise Exception("MotherDuck cloud is offline. Refusing to run locally to prevent server crash.")
             
     return _global_conn
 
@@ -199,43 +187,33 @@ def _run_inddata_search(field: str, value: str, limit: int = 10) -> list[dict]:
         return []
     
     v = str(value).replace("'", "''")
-    chunks = _get_inddata_chunks()
-    mapped_results = []
     con = _get_conn()
     
-    # Process 10 files at a time to prevent RAM overload (OOM) on small servers!
-    batch_size = 10
+    # 🚀 Since we are now using MotherDuck, we don't need to batch the queries!
+    # MotherDuck's 64GB+ cloud servers can easily handle searching all 120 files at the exact same time without freezing!
+    sql = f"SELECT * FROM read_parquet('{INDDATA_INDEX}') WHERE {query_field} = '{v}' LIMIT {limit}"
     
-    for i in range(0, len(chunks), batch_size):
-        batch = chunks[i:i + batch_size]
-        files_list = ", ".join([f"'{INDDATA_HF_BASE}/{chunk}'" for chunk in batch])
+    try:
+        rows = con.execute(sql).fetchall()
+        cols = [d[0] for d in con.description]
+        raw_results = [dict(zip(cols, r)) for r in rows]
         
-        sql = f"SELECT * FROM read_parquet([{files_list}]) WHERE {query_field} = '{v}' LIMIT {limit - len(mapped_results)}"
-        
-        try:
-            rows = con.execute(sql).fetchall()
-            cols = [d[0] for d in con.description]
-            raw_results = [dict(zip(cols, r)) for r in rows]
-            
-            for row in raw_results:
-                mapped_results.append({
-                    "name": row.get("name"),
-                    "fathersName": row.get("fname"),
-                    "phoneNumber": row.get("mobile"),
-                    "otherNumber": row.get("alt"),
-                    "address": row.get("address"),
-                    "state": row.get("circle"),
-                    "Email": row.get("email"),
-                    "source": "Inddata (1B)"
-                })
-                
-            if len(mapped_results) >= limit:
-                break # Stop searching early if we found enough results!
-                
-        except Exception as e:
-            print(f"Inddata search error in batch {i}: {e}")
-            
-    return mapped_results
+        mapped_results = []
+        for row in raw_results:
+            mapped_results.append({
+                "name": row.get("name"),
+                "fathersName": row.get("fname"),
+                "phoneNumber": row.get("mobile"),
+                "otherNumber": row.get("alt"),
+                "address": row.get("address"),
+                "state": row.get("circle"),
+                "Email": row.get("email"),
+                "source": "Inddata (1.7B)"
+            })
+        return mapped_results
+    except Exception as e:
+        print(f"Inddata search error: {e}")
+        return []
 
 def run_sync_search(search_type: str, query: str, limit: int = 10) -> dict:
     q = query.strip()

@@ -246,9 +246,9 @@ async def process_search_input(message: Message, session: AsyncSession, state: F
     global search_queue_count
     search_queue_count += 1
     try:
-        queue_pos = search_queue_count - 1
-        if queue_pos > 0:
-            wait_msg = await message.answer(f"⏳ <b>You are in a queue!</b>\nPeople ahead of you: {queue_pos}\n<i>I will notify you when your search is over.</i>", parse_mode="HTML")
+        # Since MotherDuck can easily handle 15 active searches at once, the first 15 people are NOT in a queue!
+        if search_queue_count > 15:
+            wait_msg = await message.answer(f"⏳ <b>You are in a queue!</b>\nPeople ahead of you: {search_queue_count - 15}\n<i>I will notify you when your search is over.</i>", parse_mode="HTML")
         else:
             wait_msg = await message.answer("⏳ <b>Querying Global Database, please wait...</b>\n<code>[          ]</code>", parse_mode="HTML")
         
