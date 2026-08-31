@@ -53,7 +53,7 @@ class OSINTService:
             env = os.environ.copy()
             env["PYTHONUNBUFFERED"] = "1"
             process = await asyncio.create_subprocess_exec(
-                "sherlock", username, "--timeout", "1", "--print-found", "--no-color",
+                "sherlock", username, "--timeout", "5", "--print-found", "--no-color",
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.STDOUT,
                 env=env
