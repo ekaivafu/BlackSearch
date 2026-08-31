@@ -268,9 +268,9 @@ async def process_search_input(message: Message, session: AsyncSession, state: F
             "[==========]"
         ]
         
-        if queue_pos > 0:
+        if search_queue_count > 15:
             animation_texts = [
-                f"⏳ <b>You are in a queue!</b> ({queue_pos} ahead of you)\n<i>I will notify you when your search is over.</i>"
+                f"⏳ <b>You are in a queue!</b> ({search_queue_count - 15} ahead of you)\n<i>I will notify you when your search is over.</i>"
             ]
         elif search_type == "email":
             animation_texts = [
