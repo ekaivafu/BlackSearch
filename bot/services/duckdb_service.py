@@ -8,7 +8,7 @@ HF_INDEX_BASE = os.environ.get(
     "ICMR_HF_INDEX_BASE",
     "hf://datasets/WipeX00/scrappeddata"
 ).rstrip("/")
-PARALLELISM = int(os.environ.get("ICMR_PARALLEL", "1")) # Reduced to 1 for absolute safety on 512MB RAM!
+PARALLELISM = int(os.environ.get("ICMR_PARALLEL", "15")) # 🚀 Increased to 15 because MotherDuck is handling the load!
 THREADS_PER_CONN = int(os.environ.get("ICMR_THREADS_PER_CONN", "2"))
 DUPLICATE_CAP = 2
 
@@ -47,7 +47,7 @@ pool = ThreadPoolExecutor(max_workers=PARALLELISM, thread_name_prefix="duck")
 def _idx_ready(kind: str) -> bool:
     return kind in REMOTE_INDEXES
 
-def _get_conn() -> duckdb.DuckDBPyConnection:
+def _get_conn():
     global _global_conn
     if _global_conn is not None:
         return _global_conn
@@ -56,33 +56,39 @@ def _get_conn() -> duckdb.DuckDBPyConnection:
         if _global_conn is not None:
             return _global_conn
             
-        con = duckdb.connect()
-        import tempfile
-        tmp_dir = tempfile.gettempdir().replace('\\', '/')
-        con.execute(f"SET home_directory='{tmp_dir}'")
-        con.execute(f"SET extension_directory='{tmp_dir}/duckdb_extensions'")
-        con.execute("INSTALL parquet; LOAD parquet;")
-        con.execute("INSTALL httpfs; LOAD httpfs;")
+        md_token = os.environ.get("MOTHERDUCK_TOKEN", "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJlbWFpbCI6InNhLWQ3ZjdiODY5LTcyYTAtNGMwZS1hNmY3LTZjYjlkZjA4MWU3N0BzYS5tb3RoZXJkdWNrLmNvbSIsIm1kUmVnaW9uIjoiYXdzLWFwLW5vcnRoZWFzdC0xIiwic2Vzc2lvbiI6InNhLWQ3ZjdiODY5LTcyYTAtNGMwZS1hNmY3LTZjYjlkZjA4MWU3Ny5zYS5tb3RoZXJkdWNrLmNvbSIsInBhdCI6IjZWV1lZV05DcUtSRzlnVGMtelVMYlNoandvX2s5SmcwdTRmRXNQMFB5V2MiLCJ1c2VySWQiOiJmMDNjZGM1ZC01ZmYwLTRlYTItOTc5MS1kNjk2MmE3NDczOWEiLCJpc3MiOiJtZF9wYXQiLCJyZWFkT25seSI6ZmFsc2UsInRva2VuVHlwZSI6InJlYWRfd3JpdGUiLCJpYXQiOjE3ODgxNzg5MTR9.a8bAHSdpgv5kZfSp1219_RWRUhzgyHrGQJ6XQQdK0mg")
         
-        # Enable HTTP metadata caching to drastically improve remote query speed
-        con.execute("SET enable_http_metadata_cache=true;")
-        # Disabled object cache because caching 100GB parquet file metadata causes OOM on 512MB Render instances
-        con.execute("SET enable_object_cache=false;")
-        
-        # Restrict memory strictly for Render Free Tier (512MB max total for python + duckdb)
-        con.execute("SET memory_limit='100MB';")
-        con.execute("SET preserve_insertion_order=false;")
-        
-        hf_token = os.environ.get("HF_TOKEN", "")
-        if hf_token:
-            try:
-                con.execute(f"CREATE SECRET (TYPE HUGGINGFACE, TOKEN '{hf_token}');")
-            except Exception as e:
-                print(f"Could not set HF secret: {e}")
-        
-        con.execute(f"SET threads = {THREADS_PER_CONN}")
-        _global_conn = con
-        return _global_conn
+        try:
+            print("🚀 Connecting to MotherDuck Cloud...")
+            con = duckdb.connect(f"md:?motherduck_token={md_token}")
+            
+            hf_token = os.environ.get("HF_TOKEN", "")
+            if hf_token:
+                try:
+                    con.execute(f"CREATE OR REPLACE SECRET hf_secret (TYPE HUGGINGFACE, TOKEN '{hf_token}');")
+                except Exception as e:
+                    print(f"Could not set HF secret in MD: {e}")
+                    
+            _global_conn = con
+            print("✅ MotherDuck successfully connected!")
+        except Exception as e:
+            print(f"❌ MotherDuck connection failed: {e}. Falling back to local DuckDB.")
+            con = duckdb.connect()
+            con.execute("INSTALL parquet; LOAD parquet;")
+            con.execute("INSTALL httpfs; LOAD httpfs;")
+            con.execute("SET enable_http_metadata_cache=true;")
+            con.execute("SET enable_object_cache=false;")
+            con.execute("SET memory_limit='100MB';")
+            
+            hf_token = os.environ.get("HF_TOKEN", "")
+            if hf_token:
+                try:
+                    con.execute(f"CREATE OR REPLACE SECRET hf_secret (TYPE HUGGINGFACE, TOKEN '{hf_token}');")
+                except Exception as ex:
+                    pass
+            _global_conn = con
+            
+    return _global_conn
 
 # ── Dedup & Connected Records ───────────────────────────────────────────────
 def _person_key(row: dict) -> tuple:
