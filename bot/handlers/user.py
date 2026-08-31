@@ -248,15 +248,7 @@ async def process_search_input(message: Message, session: AsyncSession, state: F
     try:
         queue_pos = search_queue_count - 1
         if queue_pos > 0:
-            wait_msg = await message.answer(f"⏳ <b>Search is busy! You are in queue...</b>\nPeople ahead of you: {queue_pos}", parse_mode="HTML")
-        else:
-            wait_msg = None
-
-        if wait_msg:
-            try:
-                await wait_msg.edit_text("⏳ <b>Now processing your search, please wait...</b>\n<code>[          ]</code>", parse_mode="HTML")
-            except Exception:
-                pass
+            wait_msg = await message.answer(f"⏳ <b>You are in a queue!</b>\nPeople ahead of you: {queue_pos}\n<i>I will notify you when your search is over.</i>", parse_mode="HTML")
         else:
             wait_msg = await message.answer("⏳ <b>Querying Global Database, please wait...</b>\n<code>[          ]</code>", parse_mode="HTML")
         
@@ -276,7 +268,11 @@ async def process_search_input(message: Message, session: AsyncSession, state: F
             "[==========]"
         ]
         
-        if search_type == "email":
+        if queue_pos > 0:
+            animation_texts = [
+                f"⏳ <b>You are in a queue!</b> ({queue_pos} ahead of you)\n<i>I will notify you when your search is over.</i>"
+            ]
+        elif search_type == "email":
             animation_texts = [
                 "⏳ <b>Searching Personal Database...</b>",
                 "⏳ <b>Scanning 120+ Social Media Sites...</b>",

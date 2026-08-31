@@ -8,7 +8,7 @@ HF_INDEX_BASE = os.environ.get(
     "ICMR_HF_INDEX_BASE",
     "hf://datasets/WipeX00/scrappeddata"
 ).rstrip("/")
-PARALLELISM = int(os.environ.get("ICMR_PARALLEL", "10"))
+PARALLELISM = int(os.environ.get("ICMR_PARALLEL", "1")) # Reduced to 1 for absolute safety on 512MB RAM!
 THREADS_PER_CONN = int(os.environ.get("ICMR_THREADS_PER_CONN", "2"))
 DUPLICATE_CAP = 2
 
@@ -35,9 +35,9 @@ TRUECALLER_INDEXES = {
 
 INDDATA_HF_BASE = os.environ.get(
     "INDDATA_HF_INDEX_BASE",
-    "hf://datasets/eKaiva/Inddatainonefile"
+    "hf://datasets/eKaiva/ind_data_final"
 ).rstrip("/")
-INDDATA_INDEX = f"{INDDATA_HF_BASE}/users_data.parquet"
+INDDATA_INDEX = f"{INDDATA_HF_BASE}/*.parquet" # Reads all 120 perfectly chunked files!
 
 # ── DuckDB Global Connection ──────────────────────────────────────────────────
 _global_conn = None
@@ -209,9 +209,8 @@ def run_sync_search(search_type: str, query: str, limit: int = 10) -> dict:
         main_data = _run_field_search("phoneNumber", q, "exact", limit)
         tc_res = _run_truecaller_search("phoneNumber", q, limit)
         
-        # Disabled Inddata search because querying a 93GB unpartitioned remote file crashes/freezes 512MB Render instances
-        # ind_res = _run_inddata_search("phoneNumber", q, limit)
-        ind_res = []
+        # Query the newly chunked 120-file Inddata database!
+        ind_res = _run_inddata_search("phoneNumber", q, limit)
         
         # Enrich main_data with Truecaller info if available
         if tc_res and main_data["results"]:
@@ -238,9 +237,8 @@ def run_sync_search(search_type: str, query: str, limit: int = 10) -> dict:
         
     elif search_type == "email":
         tc_res = _run_truecaller_search("email", q, limit)
-        # Disabled due to 93GB file freezing the bot
-        # ind_res = _run_inddata_search("email", q, limit)
-        ind_res = []
+        # Query the newly chunked 120-file Inddata database!
+        ind_res = _run_inddata_search("email", q, limit)
         
         main_data = {"count": 0, "results": []}
         
