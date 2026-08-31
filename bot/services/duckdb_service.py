@@ -35,7 +35,7 @@ TRUECALLER_INDEXES = {
 
 INDDATA_HF_BASE = os.environ.get(
     "INDDATA_HF_INDEX_BASE",
-    "hf://datasets/eKaiva/ind_data_final"
+    "hf://datasets/eKaiva/ind_data_finalbot"
 ).rstrip("/")
 INDDATA_INDEX = f"{INDDATA_HF_BASE}/*.parquet" # Reads all 120 perfectly chunked files!
 
@@ -167,6 +167,23 @@ def _run_truecaller_search(field: str, value: str, limit: int = 10) -> list[dict
         print(f"Truecaller search error: {e}")
         return []
 
+# ── Chunk List Caching ────────────────────────────────────────────────────────
+_inddata_chunks = []
+
+def _get_inddata_chunks():
+    global _inddata_chunks
+    if not _inddata_chunks:
+        try:
+            from huggingface_hub import HfApi
+            api = HfApi(token=os.environ.get("HF_TOKEN", ""))
+            files = api.list_repo_files("eKaiva/ind_data_finalbot", repo_type="dataset")
+            _inddata_chunks = [f for f in files if f.startswith("chunk_") and f.endswith(".parquet")]
+            _inddata_chunks.sort()
+        except Exception as e:
+            print(f"HF API Chunk fetch failed: {e}. Falling back to 120 chunks.")
+            _inddata_chunks = [f"chunk_{i:04d}.parquet" for i in range(1, 121)]
+    return _inddata_chunks
+
 def _run_inddata_search(field: str, value: str, limit: int = 10) -> list[dict]:
     if field == "phoneNumber":
         query_field = "mobile"
@@ -176,32 +193,43 @@ def _run_inddata_search(field: str, value: str, limit: int = 10) -> list[dict]:
         return []
     
     v = str(value).replace("'", "''")
-    # Columns in parquet: mobile, name, fname, address, alt, circle, id, email
-    sql = f"SELECT * FROM read_parquet('{INDDATA_INDEX}') WHERE {query_field} = '{v}' LIMIT {limit}"
-    
+    chunks = _get_inddata_chunks()
+    mapped_results = []
     con = _get_conn()
-    try:
-        rows = con.execute(sql).fetchall()
-        cols = [d[0] for d in con.description]
-        raw_results = [dict(zip(cols, r)) for r in rows]
+    
+    # Process 10 files at a time to prevent RAM overload (OOM) on small servers!
+    batch_size = 10
+    
+    for i in range(0, len(chunks), batch_size):
+        batch = chunks[i:i + batch_size]
+        files_list = ", ".join([f"'{INDDATA_HF_BASE}/{chunk}'" for chunk in batch])
         
-        # Map to standard schema
-        mapped_results = []
-        for row in raw_results:
-            mapped_results.append({
-                "name": row.get("name"),
-                "fathersName": row.get("fname"),
-                "phoneNumber": row.get("mobile"),
-                "otherNumber": row.get("alt"),
-                "address": row.get("address"),
-                "state": row.get("circle"),
-                "Email": row.get("email"),
-                "source": "Inddata (1B)"
-            })
-        return mapped_results
-    except Exception as e:
-        print(f"Inddata search error: {e}")
-        return []
+        sql = f"SELECT * FROM read_parquet([{files_list}]) WHERE {query_field} = '{v}' LIMIT {limit - len(mapped_results)}"
+        
+        try:
+            rows = con.execute(sql).fetchall()
+            cols = [d[0] for d in con.description]
+            raw_results = [dict(zip(cols, r)) for r in rows]
+            
+            for row in raw_results:
+                mapped_results.append({
+                    "name": row.get("name"),
+                    "fathersName": row.get("fname"),
+                    "phoneNumber": row.get("mobile"),
+                    "otherNumber": row.get("alt"),
+                    "address": row.get("address"),
+                    "state": row.get("circle"),
+                    "Email": row.get("email"),
+                    "source": "Inddata (1B)"
+                })
+                
+            if len(mapped_results) >= limit:
+                break # Stop searching early if we found enough results!
+                
+        except Exception as e:
+            print(f"Inddata search error in batch {i}: {e}")
+            
+    return mapped_results
 
 def run_sync_search(search_type: str, query: str, limit: int = 10) -> dict:
     q = query.strip()
