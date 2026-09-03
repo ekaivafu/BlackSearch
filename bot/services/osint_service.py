@@ -4,11 +4,18 @@ import os
 
 class OSINTService:
     @staticmethod
-    async def check_email_holehe(email: str) -> list[str]:
+    async def check_email_holehe(email: str) -> dict:
         """
         Runs the holehe python script in a separate process to avoid trio vs asyncio conflicts.
-        Returns a list of website names where the email is registered.
+        Returns a dict:
+          {
+            "found":         ["discord", ...],   # confirmed registered
+            "blocked":       ["instagram", ...], # couldn't check (CAPTCHA/firewall)
+            "checked_count": 55,
+            "blocked_count": 12,
+          }
         """
+        empty = {"found": [], "blocked": [], "checked_count": 0, "blocked_count": 0}
         try:
             # Get path to the holehe script
             script_path = os.path.join(os.path.dirname(__file__), "..", "scripts", "run_holehe.py")
@@ -22,24 +29,31 @@ class OSINTService:
             
             stdout, stderr = await process.communicate()
             
-            # Output might contain warnings before the JSON array.
-            # We can find the first '[' and parse from there.
+            # Find the first '{' (new format) or '[' (old format) and parse from there.
             output_str = stdout.decode('utf-8').strip()
             
             try:
+                # New format: JSON object
+                start_idx = output_str.find('{')
+                if start_idx != -1:
+                    data = json.loads(output_str[start_idx:])
+                    if isinstance(data, dict) and "found" in data:
+                        return data
+                
+                # Fallback: old plain list format
                 start_idx = output_str.find('[')
                 if start_idx != -1:
-                    json_str = output_str[start_idx:]
-                    sites = json.loads(json_str)
-                    return sorted(sites)
+                    sites = json.loads(output_str[start_idx:])
+                    if isinstance(sites, list):
+                        return {**empty, "found": sorted(sites)}
             except Exception:
                 pass
                 
-            return []
+            return empty
             
         except Exception as e:
             print(f"Holehe OSINT Error: {e}")
-            return []
+            return empty
 
     @staticmethod
     async def search_username_sherlock(username: str) -> list[dict]:

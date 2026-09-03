@@ -26,7 +26,9 @@ class SearchService:
             
             if search_type == "username":
                 from bot.services.osint_service import OSINTService
-                osint_sites = await asyncio.wait_for(OSINTService.search_username_sherlock(query), timeout=75.0)
+                osint_sites   = await asyncio.wait_for(OSINTService.search_username_sherlock(query), timeout=75.0)
+                osint_blocked = []   # not applicable for username searches
+                osint_checked = 0
                 data = {"count": 0, "results": []}
             else:
                 data_future = loop.run_in_executor(
@@ -40,13 +42,22 @@ class SearchService:
                 if search_type == "email":
                     from bot.services.osint_service import OSINTService
                     osint_future = asyncio.create_task(OSINTService.check_email_holehe(query))
-                    data, osint_sites = await asyncio.gather(
+                    data, osint_result = await asyncio.gather(
                         asyncio.wait_for(data_future, timeout=300.0),
-                        asyncio.wait_for(osint_future, timeout=30.0)
+                        asyncio.wait_for(osint_future, timeout=120.0)
                     )
+                    # Unpack new dict format (with fallback for old list format)
+                    if isinstance(osint_result, dict):
+                        osint_sites   = osint_result.get("found", [])
+                        osint_blocked = osint_result.get("blocked", [])
+                        osint_checked = osint_result.get("checked_count", 0)
+                    else:
+                        osint_sites   = osint_result if isinstance(osint_result, list) else []
+                        osint_blocked = []
+                        osint_checked = 0
                 else:
                     data = await asyncio.wait_for(data_future, timeout=300.0)
-                    osint_sites = []
+                    osint_sites, osint_blocked, osint_checked = [], [], 0
                 
             duration = round(time.time() - start_time, 2)
             is_success = bool(data.get("count", 0)) or bool(osint_sites)
@@ -66,12 +77,19 @@ class SearchService:
             # Format OSINT Results
             if search_type == "email":
                 results_text += "<b>--- OSINT Linked Sites ---</b>\n"
+                results_text += f"<i>Checked {osint_checked} sites</i>\n"
                 if osint_sites:
-                    results_text += f"🔗 <b>Found {len(osint_sites)} connected accounts!</b>\n"
+                    results_text += f"🔗 <b>Found {len(osint_sites)} connected account(s)!</b>\n"
                     for site in osint_sites:
                         results_text += f"🟢 {site}\n"
                 else:
-                    results_text += "❌ No linked accounts found.\n"
+                    results_text += "❌ No linked accounts found on checked sites.\n"
+                if osint_blocked:
+                    results_text += f"\n⚠️ <b>{len(osint_blocked)} site(s) blocked the check</b> (CAPTCHA / firewall):\n"
+                    results_text += ", ".join(f"<code>{s}</code>" for s in osint_blocked[:15])
+                    if len(osint_blocked) > 15:
+                        results_text += f" (+{len(osint_blocked) - 15} more)"
+                    results_text += "\n"
             elif search_type == "username":
                 results_text += "<b>--- OSINT Linked Sites ---</b>\n"
                 if osint_sites:

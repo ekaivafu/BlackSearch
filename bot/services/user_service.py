@@ -193,6 +193,12 @@ class UserService:
         result = await self.session.execute(stmt)
         return list(result.scalars().all())
 
+    async def get_all_users(self) -> List[User]:
+        """Return every user (all statuses) ordered by join date. Used for admin reports."""
+        stmt = select(User).order_by(User.created_at.asc())
+        result = await self.session.execute(stmt)
+        return list(result.scalars().all())
+
     async def get_stats(self) -> dict:
         from sqlalchemy import func
         stats = {}

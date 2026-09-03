@@ -351,6 +351,29 @@ async def cmd_recharge(message: Message, session: AsyncSession, bot: Bot):
     )
     await message.answer(text, reply_markup=get_payment_packages_keyboard(), parse_mode="HTML")
 
+@router.callback_query(F.data == "request_recharge")
+async def cb_request_recharge(callback: CallbackQuery, session: AsyncSession, bot: Bot):
+    """Handler for the 'Request Recharge' inline button shown when credits run out.
+    Previously this button had no handler — clicking it did nothing.
+    Now it opens the package selection menu.
+    """
+    user_service = UserService(session)
+    user = await user_service.get_user_by_telegram_id(callback.from_user.id)
+    if not user or user.status != UserStatus.APPROVED:
+        return await callback.answer("You are not authorized.", show_alert=True)
+
+    if callback.from_user.id in config.admin_ids:
+        return await callback.answer("You are an Admin with unlimited credits! 👑", show_alert=True)
+
+    text = (
+        "👑 <b>Buy Credits or Unlimited Plans</b>\n\n"
+        "To purchase, please contact the owner @tgekaiva.\n\n"
+        "Select the package you want to buy below to send a purchase request to the admin:"
+    )
+    await callback.message.answer(text, reply_markup=get_payment_packages_keyboard(), parse_mode="HTML")
+    await callback.answer()  # dismiss the button spinner
+
+
 @router.callback_query(F.data.startswith("buy_package_"))
 async def cb_buy_package(callback: CallbackQuery, session: AsyncSession, bot: Bot):
     package_val = int(callback.data.split("_")[2])
@@ -362,14 +385,22 @@ async def cb_buy_package(callback: CallbackQuery, session: AsyncSession, bot: Bo
         
     req = await user_service.request_recharge(callback.from_user.id, package_val)
     if not req:
-        return await callback.answer("You already have a pending purchase request. Please wait for the admin to process it.", show_alert=True)
+        return await callback.answer(
+            "You already have a pending purchase request. Please wait for the admin to process it.",
+            show_alert=True
+        )
         
     if package_val == 15: pkg_name = "₹50 for 15 searches"
     elif package_val == 40: pkg_name = "₹100 for 40 searches"
     elif package_val == -1: pkg_name = "₹200 for 1 day unlimited"
     elif package_val == -7: pkg_name = "₹700 for 7 days unlimited"
     else: pkg_name = f"{package_val} credits"
-    
+
+    # ✅ CRITICAL FIX: answer the callback BEFORE editing the message.
+    # Without this, Telegram shows a 30-second spinning loader then silently
+    # fails — the user sees "nothing happen" even though the DB record was created.
+    await callback.answer("✅ Request sent! Please contact @tgekaiva to pay.")
+
     await callback.message.edit_text(
         f"✅ <b>Purchase Request Sent!</b>\n\nYou selected: <b>{pkg_name}</b>\n\n"
         "👉 <b>Please message @tgekaiva to complete your payment.</b>\n"
