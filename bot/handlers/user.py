@@ -381,12 +381,6 @@ async def cmd_search(message: Message, session: AsyncSession):
         reply_markup=get_search_type_keyboard(),
         parse_mode="HTML"
     )
-        
-    await message.answer(
-        "🔍 <b>Select a reconnaissance module:</b>",
-        reply_markup=get_search_type_keyboard(),
-        parse_mode="HTML"
-    )
 
 @router.message(F.text == "📱 Number Info")
 async def btn_search_phone(message: Message, session: AsyncSession, state: FSMContext):
@@ -542,6 +536,7 @@ async def process_search_input(message: Message, session: AsyncSession, state: F
     if not is_admin:
         import datetime
         now_utc = datetime.datetime.now(datetime.timezone.utc)
+        has_sub = bool(user.subscription_end and user.subscription_end > now_utc)
         await user_service.check_and_apply_daily_bonus(user)
         effective_credits = UserService.get_effective_credits(user)
         
