@@ -10,6 +10,7 @@ from bot.models.models import User, UserStatus
 from bot.keyboards.inline import get_approval_keyboard, get_recharge_request_keyboard, get_recharge_amounts_keyboard, get_search_type_keyboard
 from bot.keyboards.reply import get_main_keyboard
 from bot.config import config
+from bot.middleware.daily_bonus import DAILY_BONUS_BANNER
 import asyncio
 
 class SearchStates(StatesGroup):
@@ -92,6 +93,7 @@ async def cb_verify_sub(callback: CallbackQuery, session: AsyncSession, bot: Bot
 
     user_service = UserService(session)
     user = await user_service.get_user_by_telegram_id(callback.from_user.id)
+    is_new = False
     if not user:
         user = await user_service.create_user(
             telegram_id=callback.from_user.id,
@@ -99,8 +101,21 @@ async def cb_verify_sub(callback: CallbackQuery, session: AsyncSession, bot: Bot
             first_name=callback.from_user.first_name,
             last_name=callback.from_user.last_name
         )
+        is_new = True
 
-    await user_service.check_and_apply_daily_bonus(user)
+    if is_new and user.bonus_credits > 0:
+        await callback.message.answer(
+            DAILY_BONUS_BANNER.format(amt=user.bonus_credits),
+            parse_mode="HTML"
+        )
+    else:
+        granted, amt, _ = await user_service.check_and_apply_daily_bonus(user)
+        if granted:
+            await callback.message.answer(
+                DAILY_BONUS_BANNER.format(amt=amt),
+                parse_mode="HTML"
+            )
+
     is_admin = callback.from_user.id in config.admin_ids
     text = build_welcome_text(user, is_admin)
     await callback.message.answer(text, reply_markup=get_main_keyboard(is_admin), parse_mode="HTML")
@@ -109,6 +124,7 @@ async def cb_verify_sub(callback: CallbackQuery, session: AsyncSession, bot: Bot
 async def cmd_start(message: Message, session: AsyncSession, bot: Bot):
     user_service = UserService(session)
     user = await user_service.get_user_by_telegram_id(message.from_user.id)
+    is_new = False
     
     if not user:
         user = await user_service.create_user(
@@ -117,6 +133,7 @@ async def cmd_start(message: Message, session: AsyncSession, bot: Bot):
             first_name=message.from_user.first_name,
             last_name=message.from_user.last_name
         )
+        is_new = True
 
     if user.status != UserStatus.APPROVED:
         return await message.answer("🔒 Your account is pending authorization or has been suspended.")
@@ -133,13 +150,9 @@ async def cmd_start(message: Message, session: AsyncSession, bot: Bot):
         if missing:
             return await message.answer(RESTRICTED_TEXT, reply_markup=get_force_sub_keyboard(missing), parse_mode="HTML")
 
-    # Check and apply daily free bonus for today
-    bonus_granted, bonus_amt, _ = await user_service.check_and_apply_daily_bonus(user)
-    if bonus_granted:
+    if is_new and user.bonus_credits > 0:
         await message.answer(
-            f"🎁 <b>Daily Bonus Activated!</b>\n"
-            f"You received <b>{bonus_amt} search credits</b> for today (valid until 23:59 IST).\n"
-            "<i>Use them before midnight!</i>",
+            DAILY_BONUS_BANNER.format(amt=user.bonus_credits),
             parse_mode="HTML"
         )
 

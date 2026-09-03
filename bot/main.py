@@ -15,6 +15,7 @@ from bot.database.session import async_session, init_db
 from bot.middleware.db import DbSessionMiddleware
 from bot.middleware.auth import ThrottlingMiddleware
 from bot.middleware.forcesub import ForceSubMiddleware
+from bot.middleware.daily_bonus import DailyBonusMiddleware
 from bot.handlers import user, admin
 from bot.services import duckdb_service
 
@@ -48,6 +49,7 @@ async def main():
     dp.message.middleware(ThrottlingMiddleware(limit_seconds=1.0))
     dp.message.middleware(ForceSubMiddleware())
     dp.callback_query.middleware(ForceSubMiddleware())
+    dp.message.middleware(DailyBonusMiddleware())
     
     # Routers
     dp.include_router(user.router)
