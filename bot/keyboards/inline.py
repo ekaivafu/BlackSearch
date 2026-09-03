@@ -100,3 +100,28 @@ def get_search_type_keyboard() -> InlineKeyboardMarkup:
     builder.button(text="🪪 Aadhaar", callback_data="search_type_aadhar")
     builder.adjust(2)
     return builder.as_markup()
+
+def get_force_sub_keyboard(missing_channels: list) -> InlineKeyboardMarkup:
+    builder = InlineKeyboardBuilder()
+    for ch in missing_channels:
+        builder.button(text=f"📢 Join {ch.title}", url=ch.invite_link)
+    builder.button(text="🔄 Check Again / Verify", callback_data="verify_sub")
+    builder.adjust(1)
+    return builder.as_markup()
+
+def get_admin_channels_keyboard() -> InlineKeyboardMarkup:
+    builder = InlineKeyboardBuilder()
+    builder.button(text="➕ Add Channel", callback_data="admin_ch_add")
+    builder.button(text="🗑️ Remove Channel", callback_data="admin_ch_del_list")
+    builder.button(text="🔄 Refresh", callback_data="admin_ch_refresh")
+    builder.button(text="❌ Close", callback_data="admin_ch_close")
+    builder.adjust(2, 2)
+    return builder.as_markup()
+
+def get_channels_delete_keyboard(channels: list) -> InlineKeyboardMarkup:
+    builder = InlineKeyboardBuilder()
+    for ch in channels:
+        builder.button(text=f"🗑️ {ch.title}", callback_data=f"admin_ch_del_{ch.id}")
+    builder.button(text="🔙 Back to Channels", callback_data="admin_ch_refresh")
+    builder.adjust(1)
+    return builder.as_markup()

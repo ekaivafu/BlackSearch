@@ -6,7 +6,8 @@ from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.context import FSMContext
 from bot.services.user_service import UserService
 from bot.services.plan_service import PlanService
-from bot.models.models import TransactionType, CreditTransaction, User, RechargeStatus, UserStatus, Plan, PlanType
+from bot.services.channel_service import ChannelService
+from bot.models.models import TransactionType, CreditTransaction, User, RechargeStatus, UserStatus, Plan, PlanType, RequiredChannel
 from bot.config import config
 from bot.keyboards.inline import (
     get_recharge_approval_keyboard,
@@ -15,11 +16,16 @@ from bot.keyboards.inline import (
     get_plans_selection_keyboard,
     get_plan_edit_fields_keyboard,
     get_plan_delete_confirm_keyboard,
+    get_admin_channels_keyboard,
+    get_channels_delete_keyboard,
 )
 import datetime
 
 class AdminStates(StatesGroup):
     pass
+
+class ChannelAdminStates(StatesGroup):
+    waiting_for_channel_input = State()
 
 class PlanAdminStates(StatesGroup):
     create_value = State()
@@ -349,7 +355,7 @@ async def cb_approve_recharge(callback: CallbackQuery, session: AsyncSession, bo
         user = await session.get(User, req.user_id)
         if user:
             try:
-                await bot.send_message(user.telegram_user_id, f"✅ Your purchase for **{pkg}** was approved! Your account is upgraded.", parse_mode="Markdown")
+                await bot.send_message(user.telegram_user_id, f"✅ Your purchase for <b>{pkg}</b> was approved! Your account is upgraded.", parse_mode="HTML")
             except Exception:
                 pass
     else:
@@ -999,4 +1005,192 @@ async def process_free_credits_value(message: Message, session: AsyncSession, st
         reply_markup=get_admin_plans_keyboard(),
         parse_mode="HTML"
     )
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 📢 Required Channels Management (Force Subscription)
+# ─────────────────────────────────────────────────────────────────────────────
+
+async def _build_channels_dashboard_text(session: AsyncSession) -> str:
+    cs = ChannelService(session)
+    channels = await cs.get_active_channels()
+
+    lines = [
+        "📢 <b>Required Channels Dashboard</b>\n"
+        "━━━━━━━━━━━━━━━━━━━━━\n"
+        "Every user (existing or new) must join these channels to access the bot.\n"
+    ]
+    if not channels:
+        lines.append("<i>ℹ️ No required channels are currently configured. The bot is open to all users.</i>\n")
+    else:
+        lines.append("<b>Active Required Channels:</b>")
+        for i, ch in enumerate(channels, 1):
+            user_part = f" ({ch.username})" if ch.username else ""
+            lines.append(
+                f"{i}. 📢 <b>{ch.title}</b>{user_part}\n"
+                f"   🔗 <code>{ch.invite_link}</code>\n"
+                f"   🆔 <code>{ch.channel_id}</code>"
+            )
+        lines.append("")
+
+    lines.append(
+        "<i>Quick Commands:</i>\n"
+        "• /channels — View this dashboard\n"
+        "• /addchannel — Add a required channel\n"
+        "• /delchannel — Remove a required channel"
+    )
+    return "\n".join(lines)
+
+@router.message(F.text == "📢 Channels")
+@router.message(Command("channels"))
+async def cmd_manage_channels(message: Message, session: AsyncSession, state: FSMContext):
+    if not is_admin(message.from_user.id):
+        return
+    await state.clear()
+    text = await _build_channels_dashboard_text(session)
+    await message.answer(text, reply_markup=get_admin_channels_keyboard(), parse_mode="HTML")
+
+@router.callback_query(F.data == "admin_ch_refresh")
+async def cb_channels_refresh(callback: CallbackQuery, session: AsyncSession, state: FSMContext):
+    if not is_admin(callback.from_user.id):
+        return await callback.answer("Unauthorized.", show_alert=True)
+    await state.clear()
+    text = await _build_channels_dashboard_text(session)
+    try:
+        await callback.message.edit_text(text, reply_markup=get_admin_channels_keyboard(), parse_mode="HTML")
+    except Exception:
+        await callback.message.answer(text, reply_markup=get_admin_channels_keyboard(), parse_mode="HTML")
+    await callback.answer("Dashboard refreshed")
+
+@router.callback_query(F.data == "admin_ch_close")
+async def cb_channels_close(callback: CallbackQuery, state: FSMContext):
+    if not is_admin(callback.from_user.id):
+        return await callback.answer("Unauthorized.", show_alert=True)
+    await state.clear()
+    try:
+        await callback.message.delete()
+    except Exception:
+        await callback.message.edit_text("Closed.")
+    await callback.answer()
+
+@router.message(Command("addchannel"))
+@router.callback_query(F.data == "admin_ch_add")
+async def cmd_add_channel(event: Message | CallbackQuery, bot: Bot, state: FSMContext):
+    user_id = event.from_user.id
+    if not is_admin(user_id):
+        if isinstance(event, CallbackQuery):
+            await event.answer("Unauthorized.", show_alert=True)
+        return
+
+    await state.clear()
+    me = await bot.get_me()
+    bot_username = f"@{me.username}" if me.username else "this bot"
+
+    text = (
+        "➕ <b>Add Required Channel / Group</b>\n"
+        "━━━━━━━━━━━━━━━━━━━━━\n"
+        "⚠️ <b>CRITICAL PREREQUISITE:</b>\n"
+        f"You <b>MUST add {bot_username} as an Administrator</b> in your channel/group first!\n\n"
+        "<i>Without admin privileges, Telegram will NOT permit the bot to check member statuses.</i>\n\n"
+        "👉 <b>Now send the channel:</b>\n"
+        "• Its public <b>@username</b> (e.g. <code>@MyChannel</code>)\n"
+        "• OR its numerical <b>Chat ID</b> (e.g. <code>-1001234567890</code>)\n\n"
+        "<i>Send /cancel to abort.</i>"
+    )
+
+    await state.set_state(ChannelAdminStates.waiting_for_channel_input)
+    if isinstance(event, CallbackQuery):
+        await event.message.edit_text(text, parse_mode="HTML")
+        await event.answer()
+    else:
+        await event.answer(text, parse_mode="HTML")
+
+@router.message(ChannelAdminStates.waiting_for_channel_input)
+async def process_channel_input(message: Message, bot: Bot, session: AsyncSession, state: FSMContext):
+    if not is_admin(message.from_user.id):
+        return
+    text = message.text.strip()
+    if text == "/cancel":
+        await state.clear()
+        return await message.answer("Adding channel cancelled.")
+
+    # Try to parse channel identifier
+    identifier = text
+    if identifier.lstrip("-").isdigit():
+        identifier = int(identifier)
+
+    # Verify bot is an admin in the channel
+    is_admin_in_chat, err_msg, info = await ChannelService.verify_bot_admin_status(bot, identifier)
+    if not is_admin_in_chat:
+        return await message.answer(
+            f"❌ <b>Verification Failed:</b>\n\n{err_msg}\n\n"
+            "Please make sure the bot is an Administrator in the channel, then send the @username or ID again, or send /cancel.",
+            parse_mode="HTML"
+        )
+
+    # Save to database
+    cs = ChannelService(session)
+    ch = await cs.add_or_update_channel(
+        channel_id=info["channel_id"],
+        title=info["title"],
+        invite_link=info["invite_link"],
+        username=info.get("username")
+    )
+    await state.clear()
+
+    await message.answer(
+        "🎉 <b>Channel Successfully Added!</b>\n"
+        "━━━━━━━━━━━━━━━━━━━━━\n"
+        f"📢 <b>Title:</b> {ch.title}\n"
+        f"🔗 <b>Invite Link:</b> {ch.invite_link}\n"
+        f"🆔 <b>Chat ID:</b> <code>{ch.channel_id}</code>\n\n"
+        "🛡️ Bot status: <b>Verified Administrator ✅</b>\n\n"
+        "<i>All non-admin users must now join this channel before they can use the bot.</i>",
+        reply_markup=get_admin_channels_keyboard(),
+        parse_mode="HTML"
+    )
+
+@router.message(Command("delchannel"))
+@router.callback_query(F.data == "admin_ch_del_list")
+async def cmd_del_channel(event: Message | CallbackQuery, session: AsyncSession, state: FSMContext):
+    user_id = event.from_user.id
+    if not is_admin(user_id):
+        if isinstance(event, CallbackQuery):
+            await event.answer("Unauthorized.", show_alert=True)
+        return
+
+    await state.clear()
+    cs = ChannelService(session)
+    channels = await cs.get_active_channels()
+    if not channels:
+        msg = "❌ No active required channels found to delete."
+        if isinstance(event, CallbackQuery):
+            await event.message.edit_text(msg, reply_markup=get_admin_channels_keyboard())
+            await event.answer()
+        else:
+            await event.answer(msg)
+        return
+
+    text = "🗑️ <b>Select a channel to remove from requirements:</b>"
+    if isinstance(event, CallbackQuery):
+        await event.message.edit_text(text, reply_markup=get_channels_delete_keyboard(channels), parse_mode="HTML")
+        await event.answer()
+    else:
+        await event.answer(text, reply_markup=get_channels_delete_keyboard(channels), parse_mode="HTML")
+
+@router.callback_query(F.data.startswith("admin_ch_del_"))
+async def cb_delete_channel(callback: CallbackQuery, session: AsyncSession):
+    if not is_admin(callback.from_user.id):
+        return await callback.answer("Unauthorized.", show_alert=True)
+
+    record_id = int(callback.data.split("_")[3])
+    cs = ChannelService(session)
+    ch = await cs.get_channel_by_id(record_id)
+    title = ch.title if ch else f"#{record_id}"
+
+    await cs.delete_channel(record_id)
+    await callback.answer(f"Deleted {title}!")
+
+    text = f"✅ Channel <b>{title}</b> removed from requirements.\n\n" + await _build_channels_dashboard_text(session)
+    await callback.message.edit_text(text, reply_markup=get_admin_channels_keyboard(), parse_mode="HTML")
+
 

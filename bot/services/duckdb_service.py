@@ -325,6 +325,8 @@ FIELD_LABELS = {
     "Number": "Number"
 }
 
+import html
+
 def format_result(row: dict) -> str:
     """Format a single result record as readable text for Telegram."""
     lines = []
@@ -336,11 +338,12 @@ def format_result(row: dict) -> str:
         if val:
             emoji = FIELD_EMOJIS.get(field, "🔹")
             label = FIELD_LABELS.get(field, field.capitalize())
-            lines.append(f"{emoji} <b>{label}:</b> {str(val).strip()}")
+            safe_val = html.escape(str(val).strip())
+            lines.append(f"{emoji} <b>{label}:</b> {safe_val}")
     
     cn = row.get("connected_numbers", [])
     if cn:
-        nums = ", ".join(f"<code>{c['value']}</code>" for c in cn)
+        nums = ", ".join(f"<code>{html.escape(str(c['value']))}</code>" for c in cn)
         lines.append(f"🔗 <b>Connected Numbers:</b> {nums}")
         
     return "\n".join(lines)

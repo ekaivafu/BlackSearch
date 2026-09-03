@@ -46,6 +46,17 @@ class BotSetting(Base):
     value = Column(String, nullable=False)
     updated_at = Column(DateTime(timezone=True), onupdate=func.now())
 
+class RequiredChannel(Base):
+    __tablename__ = "required_channels"
+
+    id = Column(Integer, primary_key=True, index=True)
+    channel_id = Column(BigInteger, unique=True, index=True, nullable=False)
+    title = Column(String, nullable=False)
+    username = Column(String, nullable=True)
+    invite_link = Column(String, nullable=False)
+    is_active = Column(Boolean, default=True, nullable=False)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+
 class User(Base):
     __tablename__ = "users"
 

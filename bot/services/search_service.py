@@ -5,6 +5,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from bot.models.models import SearchLog, User
 from bot.services import duckdb_service
 
+import html
+
 logger = logging.getLogger(__name__)
 
 class SearchService:
@@ -19,6 +21,8 @@ class SearchService:
         if len(query) < 4:
             return {"success": False, "message": "Query too short."}
         
+        safe_query = html.escape(query)
+
         # 2. Perform search (async)
         loop = asyncio.get_running_loop()
         try:
@@ -64,15 +68,15 @@ class SearchService:
             
             # Format Database Results
             if data.get("count", 0):
-                results_text = f"🔍 <b>Query:</b> <code>{query}</code>  |  <b>Found:</b> {data['count']} DB results  |  ⏱️ <b>Time:</b> {duration}s\n\n"
+                results_text = f"🔍 <b>Query:</b> <code>{safe_query}</code>  |  <b>Found:</b> {data['count']} DB results  |  ⏱️ <b>Time:</b> {duration}s\n\n"
                 results_text += "<b>--- Personal Details ---</b>\n\n"
                 for i, row in enumerate(data["results"], 1):
                     results_text += f"<b>--- Record {i} ---</b>\n"
                     results_text += duckdb_service.format_result(row) + "\n\n"
             elif search_type != "username":
-                results_text = f"🔍 <b>Query:</b> <code>{query}</code>  |  ⏱️ <b>Time:</b> {duration}s\n\n<b>--- Personal Details ---</b>\n❌ No data found in database.\n\n"
+                results_text = f"🔍 <b>Query:</b> <code>{safe_query}</code>  |  ⏱️ <b>Time:</b> {duration}s\n\n<b>--- Personal Details ---</b>\n❌ No data found in database.\n\n"
             else:
-                results_text = f"🔍 <b>Query:</b> <code>{query}</code>  |  ⏱️ <b>Time:</b> {duration}s\n\n"
+                results_text = f"🔍 <b>Query:</b> <code>{safe_query}</code>  |  ⏱️ <b>Time:</b> {duration}s\n\n"
                 
             # Format OSINT Results
             if search_type == "email":
@@ -81,12 +85,12 @@ class SearchService:
                 if osint_sites:
                     results_text += f"🔗 <b>Found {len(osint_sites)} connected account(s)!</b>\n"
                     for site in osint_sites:
-                        results_text += f"🟢 {site}\n"
+                        results_text += f"🟢 {html.escape(site)}\n"
                 else:
                     results_text += "❌ No linked accounts found on checked sites.\n"
                 if osint_blocked:
                     results_text += f"\n⚠️ <b>{len(osint_blocked)} site(s) blocked the check</b> (CAPTCHA / firewall):\n"
-                    results_text += ", ".join(f"<code>{s}</code>" for s in osint_blocked[:15])
+                    results_text += ", ".join(f"<code>{html.escape(s)}</code>" for s in osint_blocked[:15])
                     if len(osint_blocked) > 15:
                         results_text += f" (+{len(osint_blocked) - 15} more)"
                     results_text += "\n"
@@ -95,7 +99,9 @@ class SearchService:
                 if osint_sites:
                     results_text += f"🔗 <b>Found {len(osint_sites)} connected accounts!</b>\n"
                     for item in osint_sites:
-                        results_text += f"🟢 <a href='{item['url']}'>{item['site']}</a>\n"
+                        safe_url = html.escape(item.get("url", ""), quote=True)
+                        safe_site = html.escape(item.get("site", ""))
+                        results_text += f"🟢 <a href='{safe_url}'>{safe_site}</a>\n"
                 else:
                     results_text += "❌ No linked accounts found.\n"
                     
@@ -108,7 +114,7 @@ class SearchService:
         except Exception as e:
             logger.error(f"Search error: {e}")
             is_success = False
-            mock_result = f"Search Failed: {str(e)}"
+            mock_result = f"Search Failed: {html.escape(str(e))}"
 
         # 3. Log the search
         log = SearchLog(

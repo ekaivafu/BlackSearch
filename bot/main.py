@@ -1,7 +1,11 @@
 import asyncio
 import logging
-from dotenv import load_dotenv
 import os
+import sys
+from dotenv import load_dotenv
+
+# Ensure parent directory is in sys.path so 'import bot...' works anywhere
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 load_dotenv(os.path.join(os.path.dirname(__file__), ".env"))
 from aiogram import Bot, Dispatcher
@@ -10,6 +14,7 @@ from bot.config import config
 from bot.database.session import async_session, init_db
 from bot.middleware.db import DbSessionMiddleware
 from bot.middleware.auth import ThrottlingMiddleware
+from bot.middleware.forcesub import ForceSubMiddleware
 from bot.handlers import user, admin
 from bot.services import duckdb_service
 
@@ -41,6 +46,8 @@ async def main():
     # Middlewares
     dp.update.middleware(DbSessionMiddleware(async_session))
     dp.message.middleware(ThrottlingMiddleware(limit_seconds=1.0))
+    dp.message.middleware(ForceSubMiddleware())
+    dp.callback_query.middleware(ForceSubMiddleware())
     
     # Routers
     dp.include_router(user.router)

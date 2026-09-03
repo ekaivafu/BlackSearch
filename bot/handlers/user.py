@@ -6,7 +6,7 @@ from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.context import FSMContext
 from bot.services.user_service import UserService
 from bot.services.search_service import SearchService
-from bot.models.models import UserStatus
+from bot.models.models import User, UserStatus
 from bot.keyboards.inline import get_approval_keyboard, get_recharge_request_keyboard, get_recharge_amounts_keyboard, get_search_type_keyboard
 from bot.keyboards.reply import get_main_keyboard
 from bot.config import config
@@ -23,6 +23,81 @@ search_lock = asyncio.Lock()
 
 router = Router()
 
+def build_welcome_text(user: User, is_admin: bool) -> str:
+    import datetime
+    now_utc = datetime.datetime.now(datetime.timezone.utc)
+
+    if is_admin:
+        quota_display = "♾️ Unlimited 👑"
+        tier_display = "👑 System Administrator"
+    elif user.subscription_end and user.subscription_end > now_utc:
+        diff = user.subscription_end - now_utc
+        days = diff.days
+        hours = diff.seconds // 3600
+        quota_display = f"♾️ Unlimited ({days}d {hours}h left)"
+        tier_display = "👑 VIP Unlimited Pass"
+    elif user.credits > 0:
+        quota_display = f"🪙 {user.credits} search credits"
+        tier_display = "🪙 Standard Operator"
+    else:
+        quota_display = "⚠️ 0 credits (Exhausted)"
+        tier_display = "⏳ Trial Expired"
+
+    name = f"{user.first_name or ''} {user.last_name or ''}".strip() or "Operator"
+
+    return (
+        "⚡ <b>BLACKSEARCH OSINT INTELLIGENCE</b> ⚡\n"
+        "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"👋 Welcome, <b>{name}</b>!\n"
+        "Your covert identity scanner and intelligence terminal.\n\n"
+        "👤 <b>Account Overview:</b>\n"
+        f"├ 🆔 <b>ID:</b> <code>{user.telegram_user_id}</code>\n"
+        f"├ 🛡️ <b>Status:</b> <code>{user.status.value.upper()}</code>\n"
+        f"├ 💎 <b>Tier:</b> {tier_display}\n"
+        f"└ 💰 <b>Search Quota:</b> <b>{quota_display}</b>\n\n"
+        "🚀 <b>Core Reconnaissance Modules:</b>\n"
+        "• 📱 <b>Number Info</b> — Reverse carrier, Truecaller & leaked datasets\n"
+        "• 🪪 <b>Aadhar Info</b> — Citizen demographics & linked registries\n"
+        "• 📧 <b>Email Info</b> — Breach intelligence & 120+ social account scan\n"
+        "• 👤 <b>Username Info</b> — Global footprint scanner across 400+ platforms\n\n"
+        "👇 <i>Select an option from the menu below to begin:</i>"
+    )
+
+@router.callback_query(F.data == "verify_sub")
+async def cb_verify_sub(callback: CallbackQuery, session: AsyncSession, bot: Bot):
+    from bot.services.channel_service import ChannelService
+    from bot.keyboards.inline import get_force_sub_keyboard
+    cs = ChannelService(session)
+    missing = await cs.get_missing_channels(bot, callback.from_user.id)
+    if missing:
+        await callback.answer("❌ You haven't joined all required channels yet! Please join and try again.", show_alert=True)
+        try:
+            await callback.message.edit_reply_markup(reply_markup=get_force_sub_keyboard(missing))
+        except Exception:
+            pass
+        return
+
+    # Success! User joined all channels.
+    await callback.answer("🎉 Verification successful! Access granted.", show_alert=True)
+    try:
+        await callback.message.delete()
+    except Exception:
+        pass
+
+    user_service = UserService(session)
+    user = await user_service.get_user_by_telegram_id(callback.from_user.id)
+    if not user:
+        user = await user_service.create_user(
+            telegram_id=callback.from_user.id,
+            username=callback.from_user.username,
+            first_name=callback.from_user.first_name,
+            last_name=callback.from_user.last_name
+        )
+
+    is_admin = callback.from_user.id in config.admin_ids
+    text = build_welcome_text(user, is_admin)
+    await callback.message.answer(text, reply_markup=get_main_keyboard(is_admin), parse_mode="HTML")
+
 @router.message(CommandStart())
 async def cmd_start(message: Message, session: AsyncSession, bot: Bot):
     user_service = UserService(session)
@@ -37,46 +112,65 @@ async def cmd_start(message: Message, session: AsyncSession, bot: Bot):
         )
 
     if user.status != UserStatus.APPROVED:
-        await message.answer("Your account is not authorized.")
-        return
+        return await message.answer("🔒 Your account is pending authorization or has been suspended.")
+
+    is_admin = message.from_user.id in config.admin_ids
+
+    # Check force subscription for non-admins
+    if not is_admin:
+        from bot.services.channel_service import ChannelService
+        from bot.keyboards.inline import get_force_sub_keyboard
+        from bot.middleware.forcesub import RESTRICTED_TEXT
+        cs = ChannelService(session)
+        missing = await cs.get_missing_channels(bot, message.from_user.id)
+        if missing:
+            return await message.answer(RESTRICTED_TEXT, reply_markup=get_force_sub_keyboard(missing), parse_mode="HTML")
 
     import datetime
-    is_admin = message.from_user.id in config.admin_ids
     now_utc = datetime.datetime.now(datetime.timezone.utc)
-    
-    if is_admin:
-        credits_display = "Unlimited 👑"
-    elif user.subscription_end and user.subscription_end > now_utc:
-        credits_display = f"Unlimited until {user.subscription_end.strftime('%Y-%m-%d %H:%M')}"
-    else:
-        credits_display = str(user.credits)
+    welcome_text = build_welcome_text(user, is_admin)
 
     await message.answer(
-        f"👋 <b>Welcome to BlackSearch!</b>\n\n💰 <b>Points/Credits:</b> <code>{credits_display}</code>\n\nPlease choose an option from the menu below:",
+        welcome_text,
         reply_markup=get_main_keyboard(is_admin),
         parse_mode="HTML"
     )
     
     if not is_admin and user.credits == 0 and not (user.subscription_end and user.subscription_end > now_utc):
-        await message.answer("⚠️ Your points are zero! Please click <b>💳 Request Recharge</b> below to buy a package.", parse_mode="HTML")
+        await message.answer(
+            "⚠️ <b>Notice:</b> You have <b>0 search credits</b> remaining.\n"
+            "Click <b>💳 Request Recharge</b> below to purchase search packs or activate Unlimited VIP access!",
+            parse_mode="HTML"
+        )
 
 @router.message(Command("help"))
 async def cmd_help(message: Message):
     text = (
-        "Available commands:\n"
-        "/start - Register or check status\n"
-        "/status - View account status\n"
-        "/search <query> - Perform a search (costs 1 credit)\n"
-        "/recharge - Request more credits\n"
-        "/cancel - Cancel current operation"
+        "📖 <b>BLACKSEARCH FIELD MANUAL</b>\n"
+        "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        "<b>User Commands:</b>\n"
+        "• /start — Launch dashboard & refresh profile\n"
+        "• /status — View credits, active VIP pass & usage metrics\n"
+        "• /search — Open interactive search selector\n"
+        "• /recharge — Browse subscription packages & request top-ups\n"
+        "• /help — Show this manual\n"
+        "• /cancel — Terminate any ongoing search prompt\n\n"
+        "💡 <b>Pro-Tips:</b>\n"
+        "• Use the quick menu buttons below for the fastest experience.\n"
+        "• Phone searches run Truecaller & internal database lookups in parallel.\n"
+        "• Email searches scan 120+ platforms to find linked social accounts."
     )
     if message.from_user.id in config.admin_ids:
         text += (
-            "\n\nAdmin commands:\n"
-            "/admin - Admin Dashboard\n"
-            "/addcredit <user_id> <amount> - Add credits to a user manually"
+            "\n\n<b>Admin Commands:</b>\n"
+            "• /admin — Administrator dashboard\n"
+            "• /plans — Manage subscription & credit packages\n"
+            "• /channels — Manage force-sub channels\n"
+            "• /freecredits — Change new user free credits\n"
+            "• /deleteuser &lt;id&gt; — Wipe user from DB to test restart\n"
+            "• /broadcast &lt;msg&gt; — Send message to all users"
         )
-    await message.answer(text)
+    await message.answer(text, parse_mode="HTML")
 
 @router.message(Command("status"))
 async def cmd_status(message: Message, session: AsyncSession):
@@ -89,19 +183,39 @@ async def cmd_status(message: Message, session: AsyncSession):
     is_admin = message.from_user.id in config.admin_ids
     import datetime
     now_utc = datetime.datetime.now(datetime.timezone.utc)
-    if is_admin:
-        credits_display = "Unlimited 👑"
-    elif user.subscription_end and user.subscription_end > now_utc:
-        credits_display = f"Unlimited until {user.subscription_end.strftime('%Y-%m-%d %H:%M')} 👑"
-    else:
-        credits_display = str(user.credits)
     
+    if is_admin:
+        credits_display = "♾️ Unlimited 👑"
+        plan_badge = "👑 System Administrator"
+    elif user.subscription_end and user.subscription_end > now_utc:
+        diff = user.subscription_end - now_utc
+        days = diff.days
+        hours = diff.seconds // 3600
+        credits_display = f"♾️ Unlimited ({days}d {hours}h left)"
+        plan_badge = "👑 VIP Unlimited Pass"
+    elif user.credits > 0:
+        credits_display = f"🪙 {user.credits} searches remaining"
+        plan_badge = "🪙 Standard Operator"
+    else:
+        credits_display = "⚠️ 0 credits (Exhausted)"
+        plan_badge = "⏳ Trial Expired"
+
+    name = f"{user.first_name or ''} {user.last_name or ''}".strip() or "Operator"
+    username_part = f"(@{user.username})" if user.username else ""
+    created_date = user.created_at.strftime('%d %b %Y, %H:%M UTC') if user.created_at else "Unknown"
+
     status_text = (
-        f"📊 <b>Account Status</b>\n\n"
-        f"🛡️ <b>Status:</b> <code>{user.status.value.upper()}</code>\n"
-        f"💰 <b>Remaining Credits:</b> <code>{credits_display}</code>\n"
-        f"🔍 <b>Total Searches:</b> <code>{user.total_searches}</code>\n"
-        f"📅 <b>Created At:</b> <code>{user.created_at.strftime('%Y-%m-%d %H:%M:%S')} UTC</code>"
+        "📊 <b>OPERATOR STATUS REPORT</b>\n"
+        "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"👤 <b>Operator:</b> {name} {username_part}\n"
+        f"🆔 <b>Telegram ID:</b> <code>{user.telegram_user_id}</code>\n"
+        f"🛡️ <b>Account Status:</b> <code>{user.status.value.upper()}</code>\n\n"
+        "💳 <b>Subscription & Quota:</b>\n"
+        f"├ 💎 <b>Tier:</b> {plan_badge}\n"
+        f"└ 💰 <b>Search Balance:</b> <b>{credits_display}</b>\n\n"
+        "📈 <b>Usage Metrics:</b>\n"
+        f"├ 🔍 <b>Searches Executed:</b> <code>{user.total_searches}</code> queries\n"
+        f"└ 📅 <b>Member Since:</b> <code>{created_date}</code>"
     )
     await message.answer(status_text, parse_mode="HTML")
 
@@ -111,7 +225,7 @@ async def cmd_search(message: Message, session: AsyncSession):
     user = await user_service.get_user_by_telegram_id(message.from_user.id)
 
     if not user or user.status != UserStatus.APPROVED:
-        return await message.answer("You are not authorized to perform searches.")
+        return await message.answer("🔒 You are not authorized to perform searches.")
 
     import datetime
     now_utc = datetime.datetime.now(datetime.timezone.utc)
@@ -119,10 +233,16 @@ async def cmd_search(message: Message, session: AsyncSession):
 
     if user.credits < 1 and not has_sub and message.from_user.id not in config.admin_ids:
         return await message.answer(
-            "Your search credits are exhausted. Please click '💳 Request Recharge' to buy more."
+            "⚠️ <b>Search Quota Exhausted!</b>\n\n"
+            "Please click <b>💳 Request Recharge</b> below to top up credits or activate an Unlimited VIP pass.",
+            parse_mode="HTML"
         )
         
-    await message.answer("Please select what you want to search by:", reply_markup=get_search_type_keyboard())
+    await message.answer(
+        "🔍 <b>Select a reconnaissance module:</b>",
+        reply_markup=get_search_type_keyboard(),
+        parse_mode="HTML"
+    )
 
 @router.message(F.text == "📱 Number Info")
 async def btn_search_phone(message: Message, session: AsyncSession, state: FSMContext):
@@ -131,7 +251,14 @@ async def btn_search_phone(message: Message, session: AsyncSession, state: FSMCo
     if not user or user.status != UserStatus.APPROVED:
         return await message.answer("❌ <b>You are not authorized.</b>", parse_mode="HTML")
     
-    await message.answer("📱 <b>Please enter the Phone Number to search:</b>", parse_mode="HTML")
+    await message.answer(
+        "📱 <b>Phone Number Lookup Module</b>\n"
+        "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        "Enter the <b>10-digit Phone Number</b> to investigate:\n\n"
+        "👉 <i>Format: <code>9876543210</code> (no +91, no spaces)</i>\n"
+        "<i>Send /cancel to abort.</i>",
+        parse_mode="HTML"
+    )
     await state.set_state(SearchStates.waiting_for_phone)
 
 @router.message(F.text == "🪪 Aadhar Info")
@@ -141,7 +268,14 @@ async def btn_aadhar_search(message: Message, session: AsyncSession, state: FSMC
     if not user or user.status != UserStatus.APPROVED:
         return await message.answer("❌ <b>You are not authorized.</b>", parse_mode="HTML")
         
-    await message.answer("🪪 <b>Please enter the Aadhaar Number to search:</b>", parse_mode="HTML")
+    await message.answer(
+        "🪪 <b>Aadhaar Identity Lookup Module</b>\n"
+        "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        "Enter the <b>12-digit Aadhaar Number</b> to investigate:\n\n"
+        "👉 <i>Format: <code>123456789012</code> (numbers only, no spaces)</i>\n"
+        "<i>Send /cancel to abort.</i>",
+        parse_mode="HTML"
+    )
     await state.set_state(SearchStates.waiting_for_aadhar)
 
 @router.message(F.text == "📧 Email Info")
@@ -151,7 +285,15 @@ async def btn_email_search(message: Message, session: AsyncSession, state: FSMCo
     if not user or user.status != UserStatus.APPROVED:
         return await message.answer("❌ <b>You are not authorized.</b>", parse_mode="HTML")
         
-    await message.answer("📧 <b>Please enter the Email Address to search:</b>", parse_mode="HTML")
+    await message.answer(
+        "📧 <b>Email OSINT & Account Scanner</b>\n"
+        "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        "Enter the <b>Target Email Address</b> to scan:\n\n"
+        "👉 <i>Format: <code>target@gmail.com</code></i>\n"
+        "<i>The engine will search database archives and check 120+ platforms.</i>\n"
+        "<i>Send /cancel to abort.</i>",
+        parse_mode="HTML"
+    )
     await state.set_state(SearchStates.waiting_for_email)
 
 @router.message(F.text == "👤 Username Info")
@@ -161,21 +303,43 @@ async def btn_username_search(message: Message, session: AsyncSession, state: FS
     if not user or user.status != UserStatus.APPROVED:
         return await message.answer("❌ <b>You are not authorized.</b>", parse_mode="HTML")
         
-    await message.answer("👤 <b>Please enter the Username to search:</b>", parse_mode="HTML")
+    await message.answer(
+        "👤 <b>Username Global Footprint Scanner</b>\n"
+        "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        "Enter the <b>Username / Handle</b> to track:\n\n"
+        "👉 <i>Format: <code>cyberrecon</code> (no @, no spaces)</i>\n"
+        "<i>Deploys Sherlock recon across 400+ online platforms worldwide.</i>\n"
+        "<i>Send /cancel to abort.</i>",
+        parse_mode="HTML"
+    )
     await state.set_state(SearchStates.waiting_for_username)
 
 @router.message(F.text == "📖 How to use")
 async def btn_how_to_use(message: Message):
     text = (
-        "🕵️‍♂️ **Welcome to the BlackSearch OSINT Guide!**\n"
-        "Here is how to use the powerful tools at your disposal:\n\n"
-        "📱 **Number Info:** Enter any 10-digit phone number. The bot will cross-reference our private database and live Truecaller records to fetch names, addresses, and connected numbers!\n\n"
-        "🪪 **Aadhar Info:** Enter a 12-digit Aadhar number to pull up deeply connected personal details from leaked governmental databases.\n\n"
-        "📧 **Email Info:** Enter an email address. The bot will search for personal details AND stealthily ping 120+ social media sites to find active accounts linked to that email!\n\n"
-        "👤 **Username Info:** Enter a gamer tag or username. We deploy our advanced intelligence engine to scan over 400 platforms across the entire internet to find every single profile matching that name!\n\n"
-        "💳 **Request Recharge:** Run out of credits? Hit this to purchase a 1-day or 7-day Unlimited Plan from the Admin!"
+        "🕵️‍♂️ <b>BLACKSEARCH OSINT FIELD GUIDE</b>\n"
+        "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        "Master the 4 powerful search modules at your disposal:\n\n"
+        "📱 <b>1. Number Lookup</b>\n"
+        "• <b>What it does:</b> Cross-references Truecaller API, telecom records, and internal archives.\n"
+        "• <b>Format:</b> 10-digit number without country code or spaces.\n"
+        "• <b>Example:</b> <code>9876543210</code>\n\n"
+        "🪪 <b>2. Aadhaar Lookup</b>\n"
+        "• <b>What it does:</b> Pulls deeply linked citizen identity and governmental leak datasets.\n"
+        "• <b>Format:</b> 12-digit Aadhaar number.\n"
+        "• <b>Example:</b> <code>123456789012</code>\n\n"
+        "📧 <b>3. Email OSINT & Social Footprint</b>\n"
+        "• <b>What it does:</b> Searches leaks and scans 120+ platforms (Discord, Spotify, GitHub, etc.) to locate active accounts.\n"
+        "• <b>Format:</b> Complete email address.\n"
+        "• <b>Example:</b> <code>target@gmail.com</code>\n\n"
+        "👤 <b>4. Username Global Recon</b>\n"
+        "• <b>What it does:</b> Deploys our Sherlock engine to scan 400+ social networks and forums worldwide.\n"
+        "• <b>Format:</b> Username handle without spaces.\n"
+        "• <b>Example:</b> <code>cyberrecon</code>\n\n"
+        "💰 <b>Need More Quota?</b>\n"
+        "Click <b>💳 Request Recharge</b> below to activate instant credits or an Unlimited VIP Pass."
     )
-    await message.answer(text, parse_mode="Markdown")
+    await message.answer(text, parse_mode="HTML")
 
 @router.message(F.text == "📊 My Status")
 async def btn_status(message: Message, session: AsyncSession):
@@ -192,7 +356,12 @@ async def btn_recharge(message: Message, session: AsyncSession, bot: Bot):
 async def process_search_input(message: Message, session: AsyncSession, state: FSMContext):
     query = message.text.strip()
     
-    if query in ["📱 Number Info", "🪪 Aadhar Info", "📧 Email Info", "👤 Username Info", "📊 My Status", "📖 How to use", "💳 Request Recharge", "⚙️ Manage Users", "💰 Manage Points", "🔍 Telegram Info"]:
+    NAV_BUTTONS = [
+        "📱 Number Info", "🪪 Aadhar Info", "📧 Email Info", "👤 Username Info",
+        "📊 My Status", "📖 How to use", "💳 Request Recharge",
+        "⚙️ Manage Users", "💰 Manage Points", "📦 Manage Plans", "📢 Channels", "🔍 Telegram Info"
+    ]
+    if query in NAV_BUTTONS:
         await state.clear()
         is_admin = message.from_user.id in config.admin_ids
         return await message.answer("Search cancelled. Please select the option again to proceed.", reply_markup=get_main_keyboard(is_admin))

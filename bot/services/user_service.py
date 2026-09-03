@@ -141,10 +141,13 @@ class UserService:
         res = await self.session.execute(stmt)
         return res.scalar_one_or_none()
 
-    async def approve_recharge(self, request_id: int, admin_id: int, approved_amount: int) -> Optional[RechargeRequest]:
+    async def approve_recharge(self, request_id: int, admin_id: int, approved_amount: Optional[int] = None) -> Optional[RechargeRequest]:
         req = await self.get_recharge_request(request_id)
         if not req or req.status != RechargeStatus.PENDING:
             return None
+
+        if approved_amount is None:
+            approved_amount = req.requested_credits
 
         req.status = RechargeStatus.APPROVED
         req.requested_credits = approved_amount
