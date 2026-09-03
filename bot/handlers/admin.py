@@ -34,6 +34,7 @@ class PlanAdminStates(StatesGroup):
     edit_value = State()
     free_credits = State()
     daily_bonus = State()
+    referral_reward = State()
 
 router = Router()
 
@@ -522,10 +523,12 @@ async def _build_plans_dashboard_text(session: AsyncSession) -> str:
     ps = PlanService(session)
     plans = await ps.get_all_plans(active_only=True)
     daily_bonus = await ps.get_daily_bonus_credits()
+    ref_reward = await ps.get_referral_reward_credits()
 
     lines = [
         "📦 <b>Plan Management Dashboard</b>\n",
-        f"🎁 <b>Daily Free Bonus:</b> <code>{daily_bonus}</code> credits/day (expires at 23:59 IST)\n",
+        f"🎁 <b>Daily Free Bonus:</b> <code>{daily_bonus}</code> credits/day (expires at 23:59 IST)",
+        f"👥 <b>Referral Reward:</b> <code>{ref_reward}</code> permanent credits / verified user\n",
         "📋 <b>Active Subscription & Credit Plans:</b>"
     ]
     if not plans:
@@ -545,7 +548,8 @@ async def _build_plans_dashboard_text(session: AsyncSession) -> str:
         "• /createplan — Create a new plan\n"
         "• /editplan — Edit an existing plan\n"
         "• /deleteplan — Delete a plan\n"
-        "• /dailybonus — Edit daily bonus credits"
+        "• /dailybonus — Edit daily bonus credits\n"
+        "• /referralreward — Edit referral reward credits"
     )
     return "\n".join(lines)
 
@@ -1030,6 +1034,54 @@ async def cb_edit_free_credits(event: Message | CallbackQuery, session: AsyncSes
 @router.message(PlanAdminStates.free_credits)
 async def process_free_credits_value(message: Message, session: AsyncSession, state: FSMContext):
     await process_daily_bonus_value(message, session, state)
+
+@router.message(Command("referralreward"))
+@router.callback_query(F.data == "admin_edit_referral_reward")
+async def cb_edit_referral_reward(event: Message | CallbackQuery, session: AsyncSession, state: FSMContext):
+    user_id = event.from_user.id
+    if not is_admin(user_id):
+        if isinstance(event, CallbackQuery):
+            await event.answer("Unauthorized.", show_alert=True)
+        return
+    await state.clear()
+    ps = PlanService(session)
+    cur_ref = await ps.get_referral_reward_credits()
+    await state.set_state(PlanAdminStates.referral_reward)
+    text = (
+        "👥 <b>Edit Referral Reward Credits</b>\n\n"
+        f"Currently, users earn: <code>{cur_ref}</code> permanent search credits when their referred friend joins channels and verifies.\n\n"
+        "<i>Rules: Referred user must have a public Telegram username &amp; join all required channels.</i>\n\n"
+        "Send the new referral reward amount:\n"
+        "<i>(Enter 0 to disable referral rewards, or 1, 2, 3, 5, etc.)\nSend /cancel to abort.</i>"
+    )
+    if isinstance(event, CallbackQuery):
+        await event.message.edit_text(text, parse_mode="HTML")
+        await event.answer()
+    else:
+        await event.answer(text, parse_mode="HTML")
+
+@router.message(PlanAdminStates.referral_reward)
+async def process_referral_reward_value(message: Message, session: AsyncSession, state: FSMContext):
+    if not is_admin(message.from_user.id):
+        return
+    text = message.text.strip()
+    if text == "/cancel":
+        await state.clear()
+        return await message.answer("Operation cancelled.")
+    if not text.isdigit() or int(text) < 0:
+        return await message.answer("⚠️ Please enter a valid non-negative number (e.g. 0, 2, 3, 5):")
+
+    val = int(text)
+    await state.clear()
+    ps = PlanService(session)
+    await ps.set_referral_reward_credits(val)
+
+    await message.answer(
+        f"✅ <b>Referral Reward Updated!</b>\n\n"
+        f"Users will now receive <b>{val}</b> permanent search credits for each verified friend who joins through their referral link.",
+        reply_markup=get_admin_plans_keyboard(),
+        parse_mode="HTML"
+    )
 
 # ─────────────────────────────────────────────────────────────────────────────
 # 📢 Required Channels Management (Force Subscription)

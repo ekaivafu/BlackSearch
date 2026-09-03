@@ -25,6 +25,7 @@ class TransactionType(str, enum.Enum):
     RECHARGE = "recharge"
     ADMIN_ADJUSTMENT = "admin_adjustment"
     DAILY_BONUS = "daily_bonus"
+    REFERRAL = "referral"
 
 class Plan(Base):
     __tablename__ = "plans"
@@ -79,6 +80,10 @@ class User(Base):
     approved_by = Column(BigInteger, nullable=True)
     subscription_end = Column(DateTime(timezone=True), nullable=True)
     is_channel_verified = Column(Boolean, default=False, nullable=False)
+    referred_by = Column(BigInteger, nullable=True)
+    referral_reward_claimed = Column(Boolean, default=False, nullable=False)
+    referral_count = Column(Integer, default=0, nullable=False)
+    referral_credits_earned = Column(Integer, default=0, nullable=False)
 
 class RechargeRequest(Base):
     __tablename__ = "recharge_requests"

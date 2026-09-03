@@ -50,9 +50,10 @@ def get_admin_plans_keyboard() -> InlineKeyboardMarkup:
     builder.button(text="✏️ Edit Plan", callback_data="admin_plan_list_edit")
     builder.button(text="🗑️ Delete Plan", callback_data="admin_plan_list_delete")
     builder.button(text="🎁 Daily Bonus", callback_data="admin_edit_daily_bonus")
+    builder.button(text="👥 Referral Bonus", callback_data="admin_edit_referral_reward")
     builder.button(text="🔄 Refresh", callback_data="admin_plans_refresh")
     builder.button(text="❌ Close", callback_data="admin_plan_close")
-    builder.adjust(2, 2, 2)
+    builder.adjust(2, 2, 2, 1)
     return builder.as_markup()
 
 def get_plan_type_selection_keyboard() -> InlineKeyboardMarkup:
@@ -124,4 +125,16 @@ def get_channels_delete_keyboard(channels: list) -> InlineKeyboardMarkup:
         builder.button(text=f"🗑️ {ch.title}", callback_data=f"admin_ch_del_{ch.id}")
     builder.button(text="🔙 Back to Channels", callback_data="admin_ch_refresh")
     builder.adjust(1)
+    return builder.as_markup()
+
+def get_referral_keyboard(bot_username: str, user_id: int) -> InlineKeyboardMarkup:
+    import urllib.parse
+    builder = InlineKeyboardBuilder()
+    link = f"https://t.me/{bot_username}?start=ref_{user_id}"
+    share_text = f"⚡ Join BlackSearch OSINT Terminal with free search credits! Lookup numbers, emails, aadhaar and usernames instantly:\n{link}"
+    share_url = f"https://t.me/share/url?url={urllib.parse.quote(link)}&text={urllib.parse.quote(share_text)}"
+    
+    builder.button(text="📲 Share Link with Friends", url=share_url)
+    builder.button(text="🔄 Refresh Stats", callback_data="ref_refresh")
+    builder.adjust(1, 1)
     return builder.as_markup()

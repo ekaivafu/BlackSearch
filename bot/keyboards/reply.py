@@ -10,6 +10,7 @@ def get_main_keyboard(is_admin: bool = False) -> ReplyKeyboardMarkup:
     builder.button(text="📧 Email Info")
     builder.button(text="👤 Username Info")
     builder.button(text="📊 My Status")
+    builder.button(text="👥 Refer & Earn")
     builder.button(text="📖 How to use")
     
     if not is_admin:
@@ -24,8 +25,8 @@ def get_main_keyboard(is_admin: bool = False) -> ReplyKeyboardMarkup:
     
     # Adjust layout
     if is_admin:
-        builder.adjust(2, 2, 2, 2, 2)
+        builder.adjust(2, 2, 2, 2, 2, 1)
     else:
-        builder.adjust(2, 2, 2, 1)
+        builder.adjust(2, 2, 2, 2)
         
     return builder.as_markup(resize_keyboard=True)

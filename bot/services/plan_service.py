@@ -161,3 +161,15 @@ class PlanService:
     async def set_daily_bonus_credits(self, amount: int) -> None:
         """Update the daily bonus credits amount."""
         await self.set_setting("daily_bonus_credits", str(max(0, amount)))
+
+    async def get_referral_reward_credits(self) -> int:
+        """Get the referral reward credits given to referrer when invited user joins and verifies."""
+        raw = await self.get_setting("referral_reward_credits", "2")
+        try:
+            return int(raw)
+        except (ValueError, TypeError):
+            return 2
+
+    async def set_referral_reward_credits(self, amount: int) -> None:
+        """Update the referral reward credits amount."""
+        await self.set_setting("referral_reward_credits", str(max(0, amount)))

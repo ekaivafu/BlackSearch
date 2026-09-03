@@ -2,6 +2,7 @@ import logging
 from typing import Optional, List, Tuple
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, update, delete
+from aiogram import Bot
 from bot.models.models import User, UserStatus, CreditTransaction, TransactionType, RechargeRequest, RechargeStatus, SearchLog
 import datetime
 
@@ -71,11 +72,25 @@ class UserService:
             user.bonus_credits_expire_at = None
         return user.credits + (user.bonus_credits or 0)
 
-    async def create_user(self, telegram_id: int, username: str = None, first_name: str = None, last_name: str = None) -> User:
+    async def create_user(
+        self,
+        telegram_id: int,
+        username: str = None,
+        first_name: str = None,
+        last_name: str = None,
+        referred_by: Optional[int] = None
+    ) -> User:
         from bot.services.plan_service import PlanService
         ps = PlanService(self.session)
         init_credits = await ps.get_initial_credits()
         daily_bonus = await ps.get_daily_bonus_credits()
+
+        # Validate referrer (cannot refer self, referrer must exist)
+        valid_referrer = None
+        if referred_by and referred_by != telegram_id:
+            referrer_obj = await self.get_user_by_telegram_id(referred_by)
+            if referrer_obj:
+                valid_referrer = referred_by
 
         user = User(
             telegram_user_id=telegram_id,
@@ -86,7 +101,11 @@ class UserService:
             credits=init_credits,
             bonus_credits=daily_bonus,
             bonus_credits_expire_at=get_end_of_today_ist() if daily_bonus > 0 else None,
-            last_daily_bonus_date=get_today_ist() if daily_bonus > 0 else None
+            last_daily_bonus_date=get_today_ist() if daily_bonus > 0 else None,
+            referred_by=valid_referrer,
+            referral_reward_claimed=False,
+            referral_count=0,
+            referral_credits_earned=0
         )
         self.session.add(user)
         await self.session.flush()
@@ -114,6 +133,85 @@ class UserService:
             await self.session.flush()
 
         return user
+
+    async def process_referral_reward(self, bot: Bot, new_user: User) -> Tuple[bool, str]:
+        """
+        Validates and awards referral bonus to the inviter when a referred user joins
+        channels and completes verification.
+        Security rules:
+        1. User must have a referrer.
+        2. Reward must not have been claimed yet.
+        3. User must have passed channel verification.
+        4. User MUST have a Telegram username (anti-bot protection).
+        5. Cannot refer oneself.
+        """
+        import html
+        if not new_user.referred_by:
+            return False, "No referrer"
+
+        if new_user.referral_reward_claimed:
+            return False, "Already claimed"
+
+        if not new_user.is_channel_verified:
+            return False, "Channel verification not completed"
+
+        if not new_user.username or not new_user.username.strip():
+            logger.info(f"Referral skipped for user {new_user.telegram_user_id}: No username")
+            return False, "User has no Telegram username"
+
+        if new_user.referred_by == new_user.telegram_user_id:
+            return False, "Self referral"
+
+        referrer = await self.get_user_by_telegram_id(new_user.referred_by)
+        if not referrer:
+            return False, "Referrer account not found"
+
+        # Mark claimed before flush to prevent race conditions
+        new_user.referral_reward_claimed = True
+
+        from bot.services.plan_service import PlanService
+        ps = PlanService(self.session)
+        reward = await ps.get_referral_reward_credits()
+
+        if reward > 0:
+            referrer.credits += reward
+            referrer.referral_count = (referrer.referral_count or 0) + 1
+            referrer.referral_credits_earned = (referrer.referral_credits_earned or 0) + reward
+
+            tx = CreditTransaction(
+                user_id=referrer.id,
+                amount=reward,
+                transaction_type=TransactionType.REFERRAL,
+                balance_after=referrer.credits + (referrer.bonus_credits or 0),
+                created_by=new_user.telegram_user_id
+            )
+            self.session.add(tx)
+            await self.session.flush()
+
+            friend_name = html.escape(f"{new_user.first_name or ''} {new_user.last_name or ''}".strip() or "A friend")
+            friend_user = f"@{html.escape(new_user.username)}"
+            referrer_msg = (
+                "🎉 <b>REFERRAL REWARD CREDITED!</b>\n"
+                "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+                f"Your invited friend <b>{friend_name}</b> ({friend_user}) joined our channel and completed verification!\n\n"
+                f"💰 <b>Reward Received:</b> <b>+{reward} Permanent Credits</b>\n"
+                f"👥 <b>Total Verified Referrals:</b> <code>{referrer.referral_count}</code>\n"
+                f"🪙 <b>Your Search Balance:</b> <code>{referrer.credits} permanent credits</code>\n\n"
+                "<i>Keep sharing your link to earn more free searches!</i>\n"
+                "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+            )
+            try:
+                await bot.send_message(
+                    chat_id=referrer.telegram_user_id,
+                    text=referrer_msg,
+                    parse_mode="HTML"
+                )
+            except Exception as e:
+                logger.debug(f"Could not notify referrer {referrer.telegram_user_id}: {e}")
+
+            return True, f"Awarded {reward} credits"
+
+        return False, "Reward is 0"
 
     async def get_pending_users(self) -> List[User]:
         stmt = select(User).where(User.status == UserStatus.PENDING).order_by(User.created_at.asc())

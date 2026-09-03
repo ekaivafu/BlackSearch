@@ -106,6 +106,9 @@ async def cb_verify_sub(callback: CallbackQuery, session: AsyncSession, bot: Bot
     # Alert admin about new verified user
     await ChannelService.notify_admins_new_user_verified(bot, session, user)
 
+    # Process referral reward for referrer (if friend joined & verified)
+    await user_service.process_referral_reward(bot, user)
+
     if is_new and user.bonus_credits > 0:
         await callback.message.answer(
             DAILY_BONUS_BANNER.format(amt=user.bonus_credits),
@@ -130,11 +133,24 @@ async def cmd_start(message: Message, session: AsyncSession, bot: Bot):
     is_new = False
     
     if not user:
+        # Check if started via referral link: e.g. /start ref_123456 or /start 123456
+        referrer_id = None
+        parts = (message.text or "").split()
+        if len(parts) > 1:
+            raw_ref = parts[1].strip()
+            if raw_ref.startswith("ref_"):
+                raw_ref = raw_ref[4:]
+            if raw_ref.isdigit():
+                parsed_ref = int(raw_ref)
+                if parsed_ref != message.from_user.id:
+                    referrer_id = parsed_ref
+
         user = await user_service.create_user(
             telegram_id=message.from_user.id,
             username=message.from_user.username,
             first_name=message.from_user.first_name,
-            last_name=message.from_user.last_name
+            last_name=message.from_user.last_name,
+            referred_by=referrer_id
         )
         is_new = True
 
@@ -157,6 +173,9 @@ async def cmd_start(message: Message, session: AsyncSession, bot: Bot):
     if not user.is_channel_verified:
         from bot.services.channel_service import ChannelService
         await ChannelService.notify_admins_new_user_verified(bot, session, user)
+
+    # Process referral reward if user was referred and is now verified
+    await user_service.process_referral_reward(bot, user)
 
     if is_new and user.bonus_credits > 0:
         await message.answer(
@@ -190,12 +209,14 @@ async def cmd_help(message: Message):
         "<b>User Commands:</b>\n"
         "• /start — Launch dashboard & refresh profile\n"
         "• /status — View credits, active VIP pass & usage metrics\n"
+        "• /refer — Refer & Earn dashboard & get invite link\n"
         "• /search — Open interactive search selector\n"
         "• /recharge — Browse subscription packages & request top-ups\n"
         "• /help — Show this manual\n"
         "• /cancel — Terminate any ongoing search prompt\n\n"
         "💡 <b>Pro-Tips:</b>\n"
         "• You get a daily bonus every day on your first message!\n"
+        "• Share your referral link (/refer) to earn permanent search credits!\n"
         "• Phone searches run Truecaller & internal database lookups in parallel.\n"
         "• Email searches scan 120+ platforms to find linked social accounts."
     )
@@ -206,6 +227,7 @@ async def cmd_help(message: Message):
             "• /plans — Manage subscription & credit packages\n"
             "• /channels — Manage force-sub channels\n"
             "• /dailybonus — Change daily free bonus credits\n"
+            "• /referralreward — Set referral reward credits\n"
             "• /deleteuser &lt;id&gt; — Wipe user from DB to test restart\n"
             "• /broadcast &lt;msg&gt; — Send message to all users"
         )
@@ -261,9 +283,75 @@ async def cmd_status(message: Message, session: AsyncSession):
         f"└ 💰 <b>Search Balance:</b> <b>{credits_display}</b>\n\n"
         "📈 <b>Usage Metrics:</b>\n"
         f"├ 🔍 <b>Searches Executed:</b> <code>{user.total_searches}</code> queries\n"
+        f"├ 👥 <b>Friends Referred:</b> <code>{user.referral_count or 0}</code> verified users\n"
         f"└ 📅 <b>Member Since:</b> <code>{created_date}</code>"
     )
     await message.answer(status_text, parse_mode="HTML")
+
+def build_referral_text(user: User, bot_username: str, reward: int) -> str:
+    ref_link = f"https://t.me/{bot_username}?start=ref_{user.telegram_user_id}"
+    ref_count = user.referral_count or 0
+    earned_credits = user.referral_credits_earned or 0
+
+    return (
+        "👥 <b>REFER & EARN FREE SEARCH CREDITS</b> 👥\n"
+        "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        "Invite your friends to <b>BlackSearch OSINT Terminal</b> and earn permanent search credits for every verified friend who joins!\n\n"
+        "🔗 <b>Your Exclusive Referral Link:</b>\n"
+        f"<code>{ref_link}</code>\n\n"
+        "📊 <b>Your Referral Performance:</b>\n"
+        f"├ 👥 <b>Verified Friends:</b> <code>{ref_count}</code> users\n"
+        f"├ 💰 <b>Total Earned:</b> <code>+{earned_credits}</code> permanent credits\n"
+        f"└ 🎁 <b>Reward per Referral:</b> <b>+{reward} Credits</b>\n\n"
+        "🛡️ <b>Anti-Abuse Verification Rules:</b>\n"
+        "1. Your friend must join using your unique referral link.\n"
+        "2. Your friend <b>must have a public Telegram username</b>.\n"
+        "3. Your friend <b>must join our required channel(s) and tap verify</b>.\n\n"
+        "<i>⚡ Credits are added automatically to your permanent balance the moment your friend verifies!</i>\n"
+        "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+    )
+
+@router.message(F.text == "👥 Refer & Earn")
+@router.message(Command("refer"))
+@router.message(Command("referral"))
+async def cmd_referral(message: Message, session: AsyncSession, bot: Bot):
+    user_service = UserService(session)
+    user = await user_service.get_user_by_telegram_id(message.from_user.id)
+    if not user:
+        return await message.answer("Please type /start first.")
+
+    from bot.services.plan_service import PlanService
+    from bot.keyboards.inline import get_referral_keyboard
+    ps = PlanService(session)
+    reward = await ps.get_referral_reward_credits()
+
+    bot_me = await bot.get_me()
+    bot_username = bot_me.username or "BlackSearchBot"
+
+    text = build_referral_text(user, bot_username, reward)
+    await message.answer(text, reply_markup=get_referral_keyboard(bot_username, user.telegram_user_id), parse_mode="HTML")
+
+@router.callback_query(F.data == "ref_refresh")
+async def cb_referral_refresh(callback: CallbackQuery, session: AsyncSession, bot: Bot):
+    user_service = UserService(session)
+    user = await user_service.get_user_by_telegram_id(callback.from_user.id)
+    if not user:
+        return await callback.answer("User not found.")
+
+    from bot.services.plan_service import PlanService
+    from bot.keyboards.inline import get_referral_keyboard
+    ps = PlanService(session)
+    reward = await ps.get_referral_reward_credits()
+
+    bot_me = await bot.get_me()
+    bot_username = bot_me.username or "BlackSearchBot"
+
+    text = build_referral_text(user, bot_username, reward)
+    try:
+        await callback.message.edit_text(text, reply_markup=get_referral_keyboard(bot_username, user.telegram_user_id), parse_mode="HTML")
+    except Exception:
+        pass
+    await callback.answer("Referral stats refreshed!")
 
 @router.message(Command("search"))
 async def cmd_search(message: Message, session: AsyncSession):
