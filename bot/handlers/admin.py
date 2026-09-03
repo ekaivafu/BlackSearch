@@ -219,6 +219,7 @@ async def btn_manage_users(message: Message, session: AsyncSession):
     user_service = UserService(session)
     users = await user_service.get_all_users()
 
+    # ── Send HTML report ──────────────────────────────────────────────────────
     html_bytes = _generate_users_html(users)
     filename = f"users_{datetime.datetime.now(datetime.timezone.utc).strftime('%Y%m%d_%H%M%S')}.html"
 
@@ -231,6 +232,24 @@ async def btn_manage_users(message: Message, session: AsyncSession):
         ),
         parse_mode="HTML"
     )
+
+    # ── Also send the admin commands reference ────────────────────────────────
+    await message.answer(
+        "<b>&#9881;&#65039; Manage Users — Commands</b>\n\n"
+        "New user requests are sent to you automatically for approval.\n\n"
+        "<b>Dashboard &amp; Stats:</b>\n"
+        "  /admin — Admin dashboard\n"
+        "  /stats — Bot statistics\n\n"
+        "<b>User Actions:</b>\n"
+        "  /ban <code>&lt;user_id&gt;</code> — Ban a user\n"
+        "  /unban <code>&lt;user_id&gt;</code> — Unban a user\n\n"
+        "<b>Credits:</b>\n"
+        "  /addcredit <code>&lt;user_id&gt; &lt;amount&gt;</code> — Add credits manually\n\n"
+        "<b>Broadcast:</b>\n"
+        "  /broadcast <code>&lt;message&gt;</code> — Message all approved users",
+        parse_mode="HTML"
+    )
+
 
 @router.message(F.text == "💰 Manage Points")
 async def btn_manage_points(message: Message):
