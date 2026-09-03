@@ -251,7 +251,8 @@ async def btn_manage_users(message: Message, session: AsyncSession):
         "  /stats — Bot statistics\n\n"
         "<b>User Actions:</b>\n"
         "  /ban <code>&lt;user_id&gt;</code> — Ban a user\n"
-        "  /unban <code>&lt;user_id&gt;</code> — Unban a user\n\n"
+        "  /unban <code>&lt;user_id&gt;</code> — Unban a user\n"
+        "  /deleteuser <code>&lt;user_id&gt;</code> — Completely delete user (for testing restart)\n\n"
         "<b>Credits:</b>\n"
         "  /addcredit <code>&lt;user_id&gt; &lt;amount&gt;</code> — Add credits manually\n\n"
         "<b>Broadcast:</b>\n"
@@ -417,6 +418,43 @@ async def cmd_unban(message: Message, session: AsyncSession):
         await message.answer(f"✅ User {target_id} has been unbanned.")
     else:
         await message.answer(f"❌ User not found or not banned.")
+
+@router.message(Command("deleteuser"))
+async def cmd_deleteuser(message: Message, session: AsyncSession):
+    if not is_admin(message.from_user.id):
+        return await message.answer("Unauthorized.")
+    
+    parts = message.text.split()
+    if len(parts) != 2:
+        return await message.answer(
+            "<b>Usage:</b> <code>/deleteuser &lt;telegram_user_id&gt;</code>\n\n"
+            "<i>Example: /deleteuser 123456789</i>\n\n"
+            "This will completely delete the user and their logs/credits from the database so they can test the bot from scratch.",
+            parse_mode="HTML"
+        )
+    
+    try:
+        target_id = int(parts[1])
+    except ValueError:
+        return await message.answer("⚠️ Invalid user ID. It must be an integer Telegram ID.")
+        
+    if target_id == message.from_user.id:
+        return await message.answer("⚠️ You cannot delete your own admin account!")
+
+    user_service = UserService(session)
+    success = await user_service.delete_user(target_id)
+    if success:
+        await message.answer(
+            f"✅ <b>User Deleted!</b>\n\n"
+            f"User <code>{target_id}</code> has been completely removed from the database.\n"
+            f"They can now send /start to test the bot as a brand new user.",
+            parse_mode="HTML"
+        )
+    else:
+        await message.answer(
+            f"❌ User <code>{target_id}</code> was not found in the database.",
+            parse_mode="HTML"
+        )
 
 @router.message(Command("stats"))
 async def cmd_stats(message: Message, session: AsyncSession):

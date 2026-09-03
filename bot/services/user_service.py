@@ -1,8 +1,8 @@
 import logging
 from typing import Optional, List
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select, update
-from bot.models.models import User, UserStatus, CreditTransaction, TransactionType, RechargeRequest, RechargeStatus
+from sqlalchemy import select, update, delete
+from bot.models.models import User, UserStatus, CreditTransaction, TransactionType, RechargeRequest, RechargeStatus, SearchLog
 import datetime
 
 logger = logging.getLogger(__name__)
@@ -226,6 +226,28 @@ class UserService:
         if not user or user.status != UserStatus.DISABLED:
             return False
         user.status = UserStatus.APPROVED
+        await self.session.flush()
+        return True
+
+    async def delete_user(self, target_id: int) -> bool:
+        """Completely delete a user and their associated records from the database."""
+        # Find user by telegram_user_id first (BigInteger)
+        user = await self.get_user_by_telegram_id(target_id)
+        if not user and abs(target_id) <= 2147483647:
+            # Fallback to internal database ID only if within 32-bit integer range
+            stmt = select(User).where(User.id == target_id)
+            res = await self.session.execute(stmt)
+            user = res.scalar_one_or_none()
+
+        if not user:
+            return False
+
+        # Clean up related child records first to ensure zero foreign key issues
+        await self.session.execute(delete(CreditTransaction).where(CreditTransaction.user_id == user.id))
+        await self.session.execute(delete(RechargeRequest).where(RechargeRequest.user_id == user.id))
+        await self.session.execute(delete(SearchLog).where(SearchLog.user_id == user.id))
+
+        await self.session.delete(user)
         await self.session.flush()
         return True
 
