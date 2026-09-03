@@ -26,6 +26,7 @@ router = Router()
 def build_welcome_text(user: User, is_admin: bool) -> str:
     import datetime
     now_utc = datetime.datetime.now(datetime.timezone.utc)
+    effective_credits = UserService.get_effective_credits(user)
 
     if is_admin:
         quota_display = "♾️ Unlimited 👑"
@@ -36,12 +37,17 @@ def build_welcome_text(user: User, is_admin: bool) -> str:
         hours = diff.seconds // 3600
         quota_display = f"♾️ Unlimited ({days}d {hours}h left)"
         tier_display = "👑 VIP Unlimited Pass"
-    elif user.credits > 0:
-        quota_display = f"🪙 {user.credits} search credits"
+    elif effective_credits > 0:
+        parts = []
+        if user.bonus_credits > 0:
+            parts.append(f"🎁 {user.bonus_credits} daily (expires 23:59 IST)")
+        if user.credits > 0:
+            parts.append(f"🪙 {user.credits} permanent")
+        quota_display = " | ".join(parts) if parts else str(effective_credits)
         tier_display = "🪙 Standard Operator"
     else:
         quota_display = "⚠️ 0 credits (Exhausted)"
-        tier_display = "⏳ Trial Expired"
+        tier_display = "⏳ Daily Bonus Expired"
 
     name = f"{user.first_name or ''} {user.last_name or ''}".strip() or "Operator"
 
@@ -94,6 +100,7 @@ async def cb_verify_sub(callback: CallbackQuery, session: AsyncSession, bot: Bot
             last_name=callback.from_user.last_name
         )
 
+    await user_service.check_and_apply_daily_bonus(user)
     is_admin = callback.from_user.id in config.admin_ids
     text = build_welcome_text(user, is_admin)
     await callback.message.answer(text, reply_markup=get_main_keyboard(is_admin), parse_mode="HTML")
@@ -126,8 +133,19 @@ async def cmd_start(message: Message, session: AsyncSession, bot: Bot):
         if missing:
             return await message.answer(RESTRICTED_TEXT, reply_markup=get_force_sub_keyboard(missing), parse_mode="HTML")
 
+    # Check and apply daily free bonus for today
+    bonus_granted, bonus_amt, _ = await user_service.check_and_apply_daily_bonus(user)
+    if bonus_granted:
+        await message.answer(
+            f"🎁 <b>Daily Bonus Activated!</b>\n"
+            f"You received <b>{bonus_amt} search credits</b> for today (valid until 23:59 IST).\n"
+            "<i>Use them before midnight!</i>",
+            parse_mode="HTML"
+        )
+
     import datetime
     now_utc = datetime.datetime.now(datetime.timezone.utc)
+    effective_credits = UserService.get_effective_credits(user)
     welcome_text = build_welcome_text(user, is_admin)
 
     await message.answer(
@@ -136,7 +154,7 @@ async def cmd_start(message: Message, session: AsyncSession, bot: Bot):
         parse_mode="HTML"
     )
     
-    if not is_admin and user.credits == 0 and not (user.subscription_end and user.subscription_end > now_utc):
+    if not is_admin and effective_credits == 0 and not (user.subscription_end and user.subscription_end > now_utc):
         await message.answer(
             "⚠️ <b>Notice:</b> You have <b>0 search credits</b> remaining.\n"
             "Click <b>💳 Request Recharge</b> below to purchase search packs or activate Unlimited VIP access!",
@@ -156,7 +174,7 @@ async def cmd_help(message: Message):
         "• /help — Show this manual\n"
         "• /cancel — Terminate any ongoing search prompt\n\n"
         "💡 <b>Pro-Tips:</b>\n"
-        "• Use the quick menu buttons below for the fastest experience.\n"
+        "• You get a daily bonus every day on your first message!\n"
         "• Phone searches run Truecaller & internal database lookups in parallel.\n"
         "• Email searches scan 120+ platforms to find linked social accounts."
     )
@@ -166,7 +184,7 @@ async def cmd_help(message: Message):
             "• /admin — Administrator dashboard\n"
             "• /plans — Manage subscription & credit packages\n"
             "• /channels — Manage force-sub channels\n"
-            "• /freecredits — Change new user free credits\n"
+            "• /dailybonus — Change daily free bonus credits\n"
             "• /deleteuser &lt;id&gt; — Wipe user from DB to test restart\n"
             "• /broadcast &lt;msg&gt; — Send message to all users"
         )
@@ -179,7 +197,9 @@ async def cmd_status(message: Message, session: AsyncSession):
     
     if not user:
         return await message.answer("Please type /start first.")
-        
+
+    await user_service.check_and_apply_daily_bonus(user)
+    effective_credits = UserService.get_effective_credits(user)
     is_admin = message.from_user.id in config.admin_ids
     import datetime
     now_utc = datetime.datetime.now(datetime.timezone.utc)
@@ -193,12 +213,17 @@ async def cmd_status(message: Message, session: AsyncSession):
         hours = diff.seconds // 3600
         credits_display = f"♾️ Unlimited ({days}d {hours}h left)"
         plan_badge = "👑 VIP Unlimited Pass"
-    elif user.credits > 0:
-        credits_display = f"🪙 {user.credits} searches remaining"
+    elif effective_credits > 0:
+        parts = []
+        if user.bonus_credits > 0:
+            parts.append(f"🎁 {user.bonus_credits} daily (expires 23:59 IST)")
+        if user.credits > 0:
+            parts.append(f"🪙 {user.credits} permanent")
+        credits_display = " | ".join(parts) if parts else str(effective_credits)
         plan_badge = "🪙 Standard Operator"
     else:
         credits_display = "⚠️ 0 credits (Exhausted)"
-        plan_badge = "⏳ Trial Expired"
+        plan_badge = "⏳ Daily Bonus Expired"
 
     name = f"{user.first_name or ''} {user.last_name or ''}".strip() or "Operator"
     username_part = f"(@{user.username})" if user.username else ""
@@ -227,16 +252,26 @@ async def cmd_search(message: Message, session: AsyncSession):
     if not user or user.status != UserStatus.APPROVED:
         return await message.answer("🔒 You are not authorized to perform searches.")
 
+    await user_service.check_and_apply_daily_bonus(user)
+    effective_credits = UserService.get_effective_credits(user)
+
     import datetime
     now_utc = datetime.datetime.now(datetime.timezone.utc)
     has_sub = user.subscription_end and user.subscription_end > now_utc
 
-    if user.credits < 1 and not has_sub and message.from_user.id not in config.admin_ids:
+    if effective_credits < 1 and not has_sub and message.from_user.id not in config.admin_ids:
         return await message.answer(
             "⚠️ <b>Search Quota Exhausted!</b>\n\n"
-            "Please click <b>💳 Request Recharge</b> below to top up credits or activate an Unlimited VIP pass.",
+            "Please click <b>💳 Request Recharge</b> below to top up credits or activate an Unlimited VIP pass.\n"
+            "<i>(Or return tomorrow for your daily bonus credits!)</i>",
             parse_mode="HTML"
         )
+        
+    await message.answer(
+        "🔍 <b>Select a reconnaissance module:</b>",
+        reply_markup=get_search_type_keyboard(),
+        parse_mode="HTML"
+    )
         
     await message.answer(
         "🔍 <b>Select a reconnaissance module:</b>",
@@ -398,11 +433,12 @@ async def process_search_input(message: Message, session: AsyncSession, state: F
     if not is_admin:
         import datetime
         now_utc = datetime.datetime.now(datetime.timezone.utc)
-        has_sub = user.subscription_end and user.subscription_end > now_utc
+        await user_service.check_and_apply_daily_bonus(user)
+        effective_credits = UserService.get_effective_credits(user)
         
-        if user.credits < 1 and not has_sub:
+        if effective_credits < 1 and not has_sub:
             return await message.answer(
-                "Your search credits are exhausted. Please request a recharge.",
+                "⚠️ Your search credits are exhausted. Please request a recharge or wait for tomorrow's daily bonus.",
                 reply_markup=get_recharge_request_keyboard()
             )
             
@@ -497,7 +533,13 @@ async def process_search_input(message: Message, session: AsyncSession, state: F
         elif user.subscription_end and user.subscription_end > now_utc:
             credits_display = f"Unlimited ({user.subscription_end.strftime('%Y-%m-%d')})"
         else:
-            credits_display = str(user.credits)
+            effective_credits = UserService.get_effective_credits(user)
+            parts = []
+            if user.bonus_credits > 0:
+                parts.append(f"🎁 {user.bonus_credits} daily")
+            if user.credits > 0:
+                parts.append(f"🪙 {user.credits} permanent")
+            credits_display = " | ".join(parts) if parts else "0"
             
         await message.answer(
             f"✅ <b>Search Successful!</b>\n\n{result['data']}\n\n💰 <b>Remaining credits:</b> <code>{credits_display}</code>",

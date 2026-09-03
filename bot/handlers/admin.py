@@ -33,6 +33,7 @@ class PlanAdminStates(StatesGroup):
     create_name = State()
     edit_value = State()
     free_credits = State()
+    daily_bonus = State()
 
 router = Router()
 
@@ -85,12 +86,19 @@ def _generate_users_html(users: list) -> bytes:
         elif u.subscription_end and u.subscription_end <= now_utc:
             plan_html = '<span class="plan-expired">Subscription Expired</span>'
             left_html = f'<span class="plan-credits">{u.credits} credits</span>'
-        elif u.credits > 0:
-            plan_html = '<span class="plan-credits">Credits</span>'
-            left_html = f'<span class="plan-credits">{u.credits} credits</span>'
         else:
-            plan_html = '<span class="plan-none">No Plan</span>'
-            left_html = '<span class="plan-none">0</span>'
+            bonus = getattr(u, "bonus_credits", 0) if (getattr(u, "bonus_credits_expire_at", None) and getattr(u, "bonus_credits_expire_at") > now_utc) else 0
+            if u.credits > 0 or bonus > 0:
+                parts = []
+                if bonus > 0:
+                    parts.append(f"{bonus} daily")
+                if u.credits > 0:
+                    parts.append(f"{u.credits} perm")
+                plan_html = '<span class="plan-credits">Credits</span>'
+                left_html = f'<span class="plan-credits">{" + ".join(parts)}</span>'
+            else:
+                plan_html = '<span class="plan-none">No Plan</span>'
+                left_html = '<span class="plan-none">0</span>'
 
         rows_html.append(
             f'<tr>'
@@ -513,11 +521,11 @@ async def cmd_broadcast(message: Message, session: AsyncSession, bot: Bot):
 async def _build_plans_dashboard_text(session: AsyncSession) -> str:
     ps = PlanService(session)
     plans = await ps.get_all_plans(active_only=True)
-    free_credits = await ps.get_initial_credits()
+    daily_bonus = await ps.get_daily_bonus_credits()
 
     lines = [
         "📦 <b>Plan Management Dashboard</b>\n",
-        f"🎁 <b>New User Free Credits:</b> <code>{free_credits}</code> credits\n",
+        f"🎁 <b>Daily Free Bonus:</b> <code>{daily_bonus}</code> credits/day (expires at 23:59 IST)\n",
         "📋 <b>Active Subscription & Credit Plans:</b>"
     ]
     if not plans:
@@ -537,7 +545,7 @@ async def _build_plans_dashboard_text(session: AsyncSession) -> str:
         "• /createplan — Create a new plan\n"
         "• /editplan — Edit an existing plan\n"
         "• /deleteplan — Delete a plan\n"
-        "• /freecredits — Change new user free credits"
+        "• /dailybonus — Edit daily bonus credits"
     )
     return "\n".join(lines)
 
@@ -966,25 +974,33 @@ async def cmd_freecredits(message: Message, session: AsyncSession, state: FSMCon
         parse_mode="HTML"
     )
 
-@router.callback_query(F.data == "admin_edit_free_credits")
-async def cb_edit_free_credits(callback: CallbackQuery, session: AsyncSession, state: FSMContext):
-    if not is_admin(callback.from_user.id):
-        return await callback.answer("Unauthorized.", show_alert=True)
+@router.message(Command("dailybonus"))
+@router.callback_query(F.data == "admin_edit_daily_bonus")
+async def cb_edit_daily_bonus(event: Message | CallbackQuery, session: AsyncSession, state: FSMContext):
+    user_id = event.from_user.id
+    if not is_admin(user_id):
+        if isinstance(event, CallbackQuery):
+            await event.answer("Unauthorized.", show_alert=True)
+        return
     await state.clear()
     ps = PlanService(session)
-    cur_cred = await ps.get_initial_credits()
-    await state.set_state(PlanAdminStates.free_credits)
-    await callback.message.edit_text(
-        f"🎁 <b>Edit New User Free Credits</b>\n\n"
-        f"Currently, newly approved/registered users receive: <code>{cur_cred}</code> free credits.\n\n"
-        "Send the new number of free credits to give to new users:\n"
-        "<i>(Enter 0 for no free credits, or 5, 10, etc.)\nSend /cancel to abort.</i>",
-        parse_mode="HTML"
+    cur_bonus = await ps.get_daily_bonus_credits()
+    await state.set_state(PlanAdminStates.daily_bonus)
+    text = (
+        "🎁 <b>Edit Daily Bonus Credits</b>\n\n"
+        f"Currently, users receive: <code>{cur_bonus}</code> credits on their 1st message of each day.\n"
+        "<i>These credits expire at 23:59 IST daily.</i>\n\n"
+        "Send the new number of daily bonus credits to give to users:\n"
+        "<i>(Enter 0 to disable daily bonus, or 1, 3, 5, etc.)\nSend /cancel to abort.</i>"
     )
-    await callback.answer()
+    if isinstance(event, CallbackQuery):
+        await event.message.edit_text(text, parse_mode="HTML")
+        await event.answer()
+    else:
+        await event.answer(text, parse_mode="HTML")
 
-@router.message(PlanAdminStates.free_credits)
-async def process_free_credits_value(message: Message, session: AsyncSession, state: FSMContext):
+@router.message(PlanAdminStates.daily_bonus)
+async def process_daily_bonus_value(message: Message, session: AsyncSession, state: FSMContext):
     if not is_admin(message.from_user.id):
         return
     text = message.text.strip()
@@ -992,19 +1008,28 @@ async def process_free_credits_value(message: Message, session: AsyncSession, st
         await state.clear()
         return await message.answer("Operation cancelled.")
     if not text.isdigit() or int(text) < 0:
-        return await message.answer("⚠️ Please enter a valid non-negative number (e.g. 0, 5, 10):")
-        
+        return await message.answer("⚠️ Please enter a valid non-negative number (e.g. 0, 3, 5):")
+
     val = int(text)
     await state.clear()
     ps = PlanService(session)
-    await ps.set_initial_credits(val)
-    
+    await ps.set_daily_bonus_credits(val)
+
     await message.answer(
-        f"✅ <b>Free Credits Updated!</b>\n\n"
-        f"All newly joined/approved users will now receive <b>{val}</b> free search credits.",
+        f"✅ <b>Daily Bonus Updated!</b>\n\n"
+        f"All users will now receive <b>{val}</b> bonus search credits on their 1st interaction of each day (valid until 23:59 IST).",
         reply_markup=get_admin_plans_keyboard(),
         parse_mode="HTML"
     )
+
+@router.message(Command("freecredits"))
+@router.callback_query(F.data == "admin_edit_free_credits")
+async def cb_edit_free_credits(event: Message | CallbackQuery, session: AsyncSession, state: FSMContext):
+    await cb_edit_daily_bonus(event, session, state)
+
+@router.message(PlanAdminStates.free_credits)
+async def process_free_credits_value(message: Message, session: AsyncSession, state: FSMContext):
+    await process_daily_bonus_value(message, session, state)
 
 # ─────────────────────────────────────────────────────────────────────────────
 # 📢 Required Channels Management (Force Subscription)

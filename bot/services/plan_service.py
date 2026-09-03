@@ -149,3 +149,15 @@ class PlanService:
     async def set_initial_credits(self, amount: int) -> None:
         """Update the free credits for new users."""
         await self.set_setting("initial_credits", str(max(0, amount)))
+
+    async def get_daily_bonus_credits(self) -> int:
+        """Get the daily bonus credits granted on the 1st message of each day (expires at 23:59)."""
+        raw = await self.get_setting("daily_bonus_credits", "3")
+        try:
+            return int(raw)
+        except (ValueError, TypeError):
+            return 3
+
+    async def set_daily_bonus_credits(self, amount: int) -> None:
+        """Update the daily bonus credits amount."""
+        await self.set_setting("daily_bonus_credits", str(max(0, amount)))

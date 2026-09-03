@@ -1,5 +1,5 @@
 import datetime
-from sqlalchemy import BigInteger, Column, Integer, String, DateTime, ForeignKey, Enum, JSON, Boolean, text
+from sqlalchemy import BigInteger, Column, Integer, String, DateTime, ForeignKey, Enum, JSON, Boolean, text, Date
 from sqlalchemy.sql import func
 from .base import Base
 import enum
@@ -24,6 +24,7 @@ class TransactionType(str, enum.Enum):
     SEARCH = "search"
     RECHARGE = "recharge"
     ADMIN_ADJUSTMENT = "admin_adjustment"
+    DAILY_BONUS = "daily_bonus"
 
 class Plan(Base):
     __tablename__ = "plans"
@@ -67,6 +68,9 @@ class User(Base):
     last_name = Column(String, nullable=True)
     status = Column(Enum(UserStatus), default=UserStatus.PENDING, nullable=False)
     credits = Column(Integer, default=0, nullable=False)
+    bonus_credits = Column(Integer, default=0, nullable=False)
+    bonus_credits_expire_at = Column(DateTime(timezone=True), nullable=True)
+    last_daily_bonus_date = Column(Date, nullable=True)
     total_searches = Column(Integer, default=0, nullable=False)
     
     created_at = Column(DateTime(timezone=True), server_default=func.now())

@@ -1,11 +1,23 @@
 import logging
-from typing import Optional, List
+from typing import Optional, List, Tuple
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, update, delete
 from bot.models.models import User, UserStatus, CreditTransaction, TransactionType, RechargeRequest, RechargeStatus, SearchLog
 import datetime
 
 logger = logging.getLogger(__name__)
+
+IST = datetime.timezone(datetime.timedelta(hours=5, minutes=30))
+
+def get_now_ist() -> datetime.datetime:
+    return datetime.datetime.now(IST)
+
+def get_today_ist() -> datetime.date:
+    return get_now_ist().date()
+
+def get_end_of_today_ist() -> datetime.datetime:
+    now = get_now_ist()
+    return datetime.datetime(now.year, now.month, now.day, 23, 59, 59, tzinfo=IST)
 
 class UserService:
     def __init__(self, session: AsyncSession):
@@ -16,10 +28,54 @@ class UserService:
         result = await self.session.execute(stmt)
         return result.scalar_one_or_none()
 
+    async def check_and_apply_daily_bonus(self, user: User) -> Tuple[bool, int, Optional[datetime.datetime]]:
+        """
+        Checks and applies the daily free bonus for the user's 1st interaction of the day.
+        Expires any old bonus credits past 23:59 IST.
+        Returns: (granted: bool, amount: int, expire_at: Optional[datetime])
+        """
+        now = get_now_ist()
+        # 1. Expire outdated bonus credits if past expiration
+        if user.bonus_credits_expire_at and now > user.bonus_credits_expire_at:
+            user.bonus_credits = 0
+            user.bonus_credits_expire_at = None
+
+        today = get_today_ist()
+        if user.last_daily_bonus_date != today:
+            from bot.services.plan_service import PlanService
+            ps = PlanService(self.session)
+            daily_bonus = await ps.get_daily_bonus_credits()
+            if daily_bonus > 0:
+                user.bonus_credits = daily_bonus
+                user.bonus_credits_expire_at = get_end_of_today_ist()
+                user.last_daily_bonus_date = today
+
+                tx = CreditTransaction(
+                    user_id=user.id,
+                    amount=daily_bonus,
+                    transaction_type=TransactionType.DAILY_BONUS,
+                    balance_after=user.credits + user.bonus_credits,
+                    created_by=user.telegram_user_id
+                )
+                self.session.add(tx)
+                await self.session.flush()
+                return True, daily_bonus, user.bonus_credits_expire_at
+
+        return False, 0, None
+
+    @staticmethod
+    def get_effective_credits(user: User) -> int:
+        now = get_now_ist()
+        if user.bonus_credits_expire_at and now > user.bonus_credits_expire_at:
+            user.bonus_credits = 0
+            user.bonus_credits_expire_at = None
+        return user.credits + (user.bonus_credits or 0)
+
     async def create_user(self, telegram_id: int, username: str = None, first_name: str = None, last_name: str = None) -> User:
         from bot.services.plan_service import PlanService
         ps = PlanService(self.session)
         init_credits = await ps.get_initial_credits()
+        daily_bonus = await ps.get_daily_bonus_credits()
 
         user = User(
             telegram_user_id=telegram_id,
@@ -27,7 +83,10 @@ class UserService:
             first_name=first_name,
             last_name=last_name,
             status=UserStatus.APPROVED,
-            credits=init_credits
+            credits=init_credits,
+            bonus_credits=daily_bonus,
+            bonus_credits_expire_at=get_end_of_today_ist() if daily_bonus > 0 else None,
+            last_daily_bonus_date=get_today_ist() if daily_bonus > 0 else None
         )
         self.session.add(user)
         await self.session.flush()
@@ -41,6 +100,17 @@ class UserService:
                 created_by=telegram_id
             )
             self.session.add(tx)
+            await self.session.flush()
+
+        if daily_bonus > 0:
+            tx_bonus = CreditTransaction(
+                user_id=user.id,
+                amount=daily_bonus,
+                transaction_type=TransactionType.DAILY_BONUS,
+                balance_after=init_credits + daily_bonus,
+                created_by=telegram_id
+            )
+            self.session.add(tx_bonus)
             await self.session.flush()
 
         return user
@@ -69,7 +139,7 @@ class UserService:
             user_id=user.id,
             amount=initial_credits,
             transaction_type=TransactionType.INITIAL_GRANT,
-            balance_after=initial_credits,
+            balance_after=initial_credits + (user.bonus_credits or 0),
             created_by=admin_id
         )
         self.session.add(tx)
@@ -96,16 +166,30 @@ class UserService:
         if user.subscription_end and user.subscription_end > now_utc:
             return True
 
-        if user.credits < amount:
+        now = get_now_ist()
+        if user.bonus_credits_expire_at and now > user.bonus_credits_expire_at:
+            user.bonus_credits = 0
+            user.bonus_credits_expire_at = None
+
+        total_available = user.credits + (user.bonus_credits or 0)
+        if total_available < amount:
             return False
 
-        user.credits -= amount
-        
+        # Deduct from expiring daily bonus credits first!
+        remaining = amount
+        if user.bonus_credits > 0:
+            from_bonus = min(user.bonus_credits, remaining)
+            user.bonus_credits -= from_bonus
+            remaining -= from_bonus
+
+        if remaining > 0:
+            user.credits -= remaining
+
         tx = CreditTransaction(
             user_id=user.id,
             amount=-amount,
             transaction_type=TransactionType.SEARCH,
-            balance_after=user.credits,
+            balance_after=user.credits + (user.bonus_credits or 0),
             created_by=telegram_id
         )
         self.session.add(tx)
