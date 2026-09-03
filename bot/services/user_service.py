@@ -294,6 +294,23 @@ class UserService:
         await self.session.flush()
         return True
 
+    async def add_credit(self, telegram_id: int, amount: int = 1) -> bool:
+        """Adds credits safely (used for refunds or adjustments)."""
+        user = await self.get_user_by_telegram_id(telegram_id)
+        if not user:
+            return False
+        user.credits += amount
+        tx = CreditTransaction(
+            user_id=user.id,
+            amount=amount,
+            transaction_type=TransactionType.ADMIN_ADJUSTMENT,
+            balance_after=user.credits + (user.bonus_credits or 0),
+            created_by=telegram_id
+        )
+        self.session.add(tx)
+        await self.session.flush()
+        return True
+
     async def request_recharge(self, telegram_id: int, amount: int, plan_id: Optional[int] = None) -> Optional[RechargeRequest]:
         user = await self.get_user_by_telegram_id(telegram_id)
         if not user:

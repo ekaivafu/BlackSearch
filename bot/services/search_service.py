@@ -68,34 +68,34 @@ class SearchService:
             
             # Format Database Results
             if data.get("count", 0):
-                results_text = f"🔍 <b>Query:</b> <code>{safe_query}</code>  |  <b>Found:</b> {data['count']} DB results  |  ⏱️ <b>Time:</b> {duration}s\n\n"
-                results_text += "<b>--- Personal Details ---</b>\n\n"
+                results_text = f"🔍 <b>Query:</b> <code>{safe_query}</code>  |  <b>Found:</b> {data['count']} records  |  ⏱️ <b>Time:</b> {duration}s\n\n"
+                results_text += "<b>--- Intelligence Records ---</b>\n\n"
                 for i, row in enumerate(data["results"], 1):
                     results_text += f"<b>--- Record {i} ---</b>\n"
                     results_text += duckdb_service.format_result(row) + "\n\n"
             elif search_type != "username":
-                results_text = f"🔍 <b>Query:</b> <code>{safe_query}</code>  |  ⏱️ <b>Time:</b> {duration}s\n\n<b>--- Personal Details ---</b>\n❌ No data found in database.\n\n"
+                results_text = f"🔍 <b>Query:</b> <code>{safe_query}</code>  |  ⏱️ <b>Time:</b> {duration}s\n\n<b>--- Intelligence Records ---</b>\n❌ No records found in database.\n\n"
             else:
                 results_text = f"🔍 <b>Query:</b> <code>{safe_query}</code>  |  ⏱️ <b>Time:</b> {duration}s\n\n"
                 
             # Format OSINT Results
             if search_type == "email":
-                results_text += "<b>--- OSINT Linked Sites ---</b>\n"
-                results_text += f"<i>Checked {osint_checked} sites</i>\n"
+                results_text += "<b>--- Connected Online Profiles ---</b>\n"
+                results_text += f"<i>Checked {osint_checked} platforms</i>\n"
                 if osint_sites:
                     results_text += f"🔗 <b>Found {len(osint_sites)} connected account(s)!</b>\n"
                     for site in osint_sites:
                         results_text += f"🟢 {html.escape(site)}\n"
                 else:
-                    results_text += "❌ No linked accounts found on checked sites.\n"
+                    results_text += "❌ No linked accounts found on checked platforms.\n"
                 if osint_blocked:
-                    results_text += f"\n⚠️ <b>{len(osint_blocked)} site(s) blocked the check</b> (CAPTCHA / firewall):\n"
+                    results_text += f"\n⚠️ <b>{len(osint_blocked)} platform(s) protected by firewall</b>:\n"
                     results_text += ", ".join(f"<code>{html.escape(s)}</code>" for s in osint_blocked[:15])
                     if len(osint_blocked) > 15:
                         results_text += f" (+{len(osint_blocked) - 15} more)"
                     results_text += "\n"
             elif search_type == "username":
-                results_text += "<b>--- OSINT Linked Sites ---</b>\n"
+                results_text += "<b>--- Connected Online Profiles ---</b>\n"
                 if osint_sites:
                     results_text += f"🔗 <b>Found {len(osint_sites)} connected accounts!</b>\n"
                     for item in osint_sites:
@@ -103,18 +103,22 @@ class SearchService:
                         safe_site = html.escape(item.get("site", ""))
                         results_text += f"🟢 <a href='{safe_url}'>{safe_site}</a>\n"
                 else:
-                    results_text += "❌ No linked accounts found.\n"
+                    results_text += "❌ No linked accounts found on scanned platforms.\n"
                     
             mock_result = results_text.strip()
             
         except asyncio.TimeoutError:
             logger.error(f"Search timed out for {query}")
             is_success = False
-            mock_result = "Search Failed: Request timed out. The database is too large and requires an index, or Hugging Face is slow."
+            mock_result = "<b>Search Timed Out:</b> The query took longer than expected to resolve. Please try again in a few moments."
         except Exception as e:
-            logger.error(f"Search error: {e}")
+            logger.error(f"Search error for {query}: {e}", exc_info=True)
             is_success = False
-            mock_result = f"Search Failed: {html.escape(str(e))}"
+            err_str = str(e).lower()
+            if "429" in err_str or "rate limit" in err_str or "too many requests" in err_str:
+                mock_result = "<b>High Network Load:</b> The intelligence database is currently handling heavy search volume. Please wait 1-2 minutes and try again."
+            else:
+                mock_result = "<b>Service Temporarily Busy:</b> Could not retrieve records from the intelligence database. Please try again shortly."
 
         # 3. Log the search
         log = SearchLog(

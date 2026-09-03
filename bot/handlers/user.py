@@ -63,7 +63,7 @@ def build_welcome_text(user: User, is_admin: bool) -> str:
         f"├ 💎 <b>Tier:</b> {tier_display}\n"
         f"└ 💰 <b>Search Quota:</b> <b>{quota_display}</b>\n\n"
         "🚀 <b>Core Reconnaissance Modules:</b>\n"
-        "• 📱 <b>Number Info</b> — Reverse carrier, Truecaller & leaked datasets\n"
+        "• 📱 <b>Number Info</b> — Telecom operator, owner identity & leaked records\n"
         "• 🪪 <b>Aadhar Info</b> — Citizen demographics & linked registries\n"
         "• 📧 <b>Email Info</b> — Breach intelligence & 120+ social account scan\n"
         "• 👤 <b>Username Info</b> — Global footprint scanner across 400+ platforms\n\n"
@@ -217,7 +217,7 @@ async def cmd_help(message: Message):
         "💡 <b>Pro-Tips:</b>\n"
         "• You get a daily bonus every day on your first message!\n"
         "• Share your referral link (/refer) to earn permanent search credits!\n"
-        "• Phone searches run Truecaller & internal database lookups in parallel.\n"
+        "• Phone searches query multiple carrier and demographic registers in parallel.\n"
         "• Email searches scan 120+ platforms to find linked social accounts."
     )
     if message.from_user.id in config.admin_ids:
@@ -446,7 +446,7 @@ async def btn_username_search(message: Message, session: AsyncSession, state: FS
         "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
         "Enter the <b>Username / Handle</b> to track:\n\n"
         "👉 <i>Format: <code>cyberrecon</code> (no @, no spaces)</i>\n"
-        "<i>Deploys Sherlock recon across 400+ online platforms worldwide.</i>\n"
+        "<i>Deploys global footprint recon across 400+ online platforms worldwide.</i>\n"
         "<i>Send /cancel to abort.</i>",
         parse_mode="HTML"
     )
@@ -459,7 +459,7 @@ async def btn_how_to_use(message: Message):
         "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
         "Master the 4 powerful search modules at your disposal:\n\n"
         "📱 <b>1. Number Lookup</b>\n"
-        "• <b>What it does:</b> Cross-references Truecaller API, telecom records, and internal archives.\n"
+        "• <b>What it does:</b> Cross-references telecom records, carrier registries, and breach archives.\n"
         "• <b>Format:</b> 10-digit number without country code or spaces.\n"
         "• <b>Example:</b> <code>9876543210</code>\n\n"
         "🪪 <b>2. Aadhaar Lookup</b>\n"
@@ -471,7 +471,7 @@ async def btn_how_to_use(message: Message):
         "• <b>Format:</b> Complete email address.\n"
         "• <b>Example:</b> <code>target@gmail.com</code>\n\n"
         "👤 <b>4. Username Global Recon</b>\n"
-        "• <b>What it does:</b> Deploys our Sherlock engine to scan 400+ social networks and forums worldwide.\n"
+        "• <b>What it does:</b> Deploys our global reconnaissance scanner across 400+ social networks and platforms worldwide.\n"
         "• <b>Format:</b> Username handle without spaces.\n"
         "• <b>Example:</b> <code>cyberrecon</code>\n\n"
         "💰 <b>Need More Quota?</b>\n"
@@ -650,7 +650,13 @@ async def process_search_input(message: Message, session: AsyncSession, state: F
             parse_mode="HTML"
         )
     else:
-        await message.answer(f"❌ {result.get('data', 'Search Failed: Unknown error')}", parse_mode="HTML")
+        # If search failed, auto-refund the deducted credit so user never loses credit!
+        if not is_admin and not has_sub:
+            await user_service.add_credit(user.telegram_user_id, 1)
+            refund_note = "\n\n💰 <i>Your search credit has been automatically refunded.</i>"
+        else:
+            refund_note = ""
+        await message.answer(f"❌ {result.get('data', 'Database temporarily unavailable.')}{refund_note}", parse_mode="HTML")
 
 from bot.keyboards.inline import get_payment_packages_keyboard
 from bot.services.plan_service import PlanService

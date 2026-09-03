@@ -306,23 +306,22 @@ FIELD_EMOJIS = {
 }
 
 FIELD_LABELS = {
-    "name": "Name",
+    "name": "Full Name",
     "fathersName": "Father's Name",
     "phoneNumber": "Phone Number",
     "aadharNumber": "Aadhaar Number",
-    "otherNumber": "Other Number",
+    "otherNumber": "Alternate Number",
     "address": "Address",
     "district": "District",
     "pincode": "Pincode",
     "state": "State",
-    "town": "Town",
-    "source": "Source",
-    "Email": "Email",
-    "Carrier": "Carrier",
+    "town": "Town / City",
+    "Email": "Email Address",
+    "Carrier": "Telecom Operator",
     "Gender": "Gender",
-    "Truecaller_Name": "Truecaller Name",
-    "Name": "Name",
-    "Number": "Number"
+    "Truecaller_Name": "Alternative Name",
+    "Name": "Full Name",
+    "Number": "Phone Number"
 }
 
 import html
@@ -334,6 +333,8 @@ def format_result(row: dict) -> str:
     fields_to_use = SEARCH_FIELDS + ["Email", "Carrier", "Gender", "Truecaller_Name", "Name", "Number"]
     
     for field in fields_to_use:
+        if field.lower() in ["source", "src"]:
+            continue  # Never expose internal database or dataset names to users
         val = row.get(field, "")
         if val:
             emoji = FIELD_EMOJIS.get(field, "🔹")
