@@ -338,24 +338,28 @@ async def process_search_input(message: Message, session: AsyncSession, state: F
         await message.answer(f"❌ {result.get('data', 'Search Failed: Unknown error')}", parse_mode="HTML")
 
 from bot.keyboards.inline import get_payment_packages_keyboard
+from bot.services.plan_service import PlanService
+from bot.models.models import PlanType
 
 @router.message(Command("recharge"))
 async def cmd_recharge(message: Message, session: AsyncSession, bot: Bot):
     if message.from_user.id in config.admin_ids:
         return await message.answer("You are an Admin! You have unlimited credits and do not need to recharge. 👑")
     
+    plan_service = PlanService(session)
+    plans = await plan_service.get_all_plans(active_only=True)
+    
     text = (
         "👑 <b>Buy Credits or Unlimited Plans</b>\n\n"
         "To purchase, please contact the owner @tgekaiva.\n\n"
         "Select the package you want to buy below to send a purchase request to the admin:"
     )
-    await message.answer(text, reply_markup=get_payment_packages_keyboard(), parse_mode="HTML")
+    await message.answer(text, reply_markup=get_payment_packages_keyboard(plans), parse_mode="HTML")
 
 @router.callback_query(F.data == "request_recharge")
 async def cb_request_recharge(callback: CallbackQuery, session: AsyncSession, bot: Bot):
     """Handler for the 'Request Recharge' inline button shown when credits run out.
-    Previously this button had no handler — clicking it did nothing.
-    Now it opens the package selection menu.
+    Opens the package selection menu with active plans from database.
     """
     user_service = UserService(session)
     user = await user_service.get_user_by_telegram_id(callback.from_user.id)
@@ -365,13 +369,73 @@ async def cb_request_recharge(callback: CallbackQuery, session: AsyncSession, bo
     if callback.from_user.id in config.admin_ids:
         return await callback.answer("You are an Admin with unlimited credits! 👑", show_alert=True)
 
+    plan_service = PlanService(session)
+    plans = await plan_service.get_all_plans(active_only=True)
+
     text = (
         "👑 <b>Buy Credits or Unlimited Plans</b>\n\n"
         "To purchase, please contact the owner @tgekaiva.\n\n"
         "Select the package you want to buy below to send a purchase request to the admin:"
     )
-    await callback.message.answer(text, reply_markup=get_payment_packages_keyboard(), parse_mode="HTML")
+    await callback.message.answer(text, reply_markup=get_payment_packages_keyboard(plans), parse_mode="HTML")
     await callback.answer()  # dismiss the button spinner
+
+
+@router.callback_query(F.data.startswith("buy_plan_"))
+async def cb_buy_plan(callback: CallbackQuery, session: AsyncSession, bot: Bot):
+    plan_id = int(callback.data.split("_")[2])
+    
+    user_service = UserService(session)
+    plan_service = PlanService(session)
+    
+    user = await user_service.get_user_by_telegram_id(callback.from_user.id)
+    if not user or user.status != UserStatus.APPROVED:
+        return await callback.answer("You are not authorized.", show_alert=True)
+        
+    plan = await plan_service.get_plan_by_id(plan_id)
+    if not plan or not plan.is_active:
+        return await callback.answer("This plan is no longer available. Please select another.", show_alert=True)
+        
+    amount_val = plan.credits if plan.plan_type == PlanType.CREDITS else -plan.days
+    req = await user_service.request_recharge(callback.from_user.id, amount_val, plan_id=plan.id)
+    if not req:
+        return await callback.answer(
+            "You already have a pending purchase request. Please wait for the admin to process it.",
+            show_alert=True
+        )
+        
+    await callback.answer("✅ Request sent! Please contact @tgekaiva to pay.")
+
+    pkg_name = f"{plan.name} (₹{plan.price})"
+    await callback.message.edit_text(
+        f"✅ <b>Purchase Request Sent!</b>\n\nYou selected: <b>{pkg_name}</b>\n\n"
+        "👉 <b>Please message @tgekaiva to complete your payment.</b>\n"
+        "Once payment is confirmed, your account will be upgraded instantly!",
+        parse_mode="HTML"
+    )
+    
+    name = f"{user.first_name} {user.last_name or ''}".strip()
+    username = f"@{user.username}" if user.username else "None"
+    
+    admin_text = (
+        f"💳 <b>New Purchase Request #{req.id}</b>\n\n"
+        f"👤 <b>Name:</b> <a href='tg://user?id={callback.from_user.id}'>{name}</a>\n"
+        f"🔗 <b>Username:</b> {username}\n"
+        f"🆔 <b>User ID:</b> <code>{callback.from_user.id}</code>\n\n"
+        f"📦 <b>Package Selected:</b> {pkg_name}"
+    )
+    
+    from bot.keyboards.inline import get_recharge_approval_keyboard
+    for admin_id in config.admin_ids:
+        try:
+            await bot.send_message(
+                chat_id=admin_id,
+                text=admin_text,
+                reply_markup=get_recharge_approval_keyboard(req.id),
+                parse_mode="HTML"
+            )
+        except Exception:
+            pass
 
 
 @router.callback_query(F.data.startswith("buy_package_"))

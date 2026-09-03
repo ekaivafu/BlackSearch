@@ -19,10 +19,11 @@ def get_main_keyboard(is_admin: bool = False) -> ReplyKeyboardMarkup:
     if is_admin:
         builder.button(text="⚙️ Manage Users")
         builder.button(text="💰 Manage Points")
+        builder.button(text="📦 Manage Plans")
     
     # Adjust layout
     if is_admin:
-        builder.adjust(2, 2, 2, 2)
+        builder.adjust(2, 2, 2, 2, 1)
     else:
         builder.adjust(2, 2, 2, 1)
         

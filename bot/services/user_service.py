@@ -17,16 +17,32 @@ class UserService:
         return result.scalar_one_or_none()
 
     async def create_user(self, telegram_id: int, username: str = None, first_name: str = None, last_name: str = None) -> User:
+        from bot.services.plan_service import PlanService
+        ps = PlanService(self.session)
+        init_credits = await ps.get_initial_credits()
+
         user = User(
             telegram_user_id=telegram_id,
             username=username,
             first_name=first_name,
             last_name=last_name,
             status=UserStatus.APPROVED,
-            credits=0
+            credits=init_credits
         )
         self.session.add(user)
         await self.session.flush()
+
+        if init_credits > 0:
+            tx = CreditTransaction(
+                user_id=user.id,
+                amount=init_credits,
+                transaction_type=TransactionType.INITIAL_GRANT,
+                balance_after=init_credits,
+                created_by=telegram_id
+            )
+            self.session.add(tx)
+            await self.session.flush()
+
         return user
 
     async def get_pending_users(self) -> List[User]:
@@ -34,10 +50,15 @@ class UserService:
         result = await self.session.execute(stmt)
         return list(result.scalars().all())
 
-    async def approve_user(self, telegram_id: int, admin_id: int, initial_credits: int) -> Optional[User]:
+    async def approve_user(self, telegram_id: int, admin_id: int, initial_credits: int = None) -> Optional[User]:
         user = await self.get_user_by_telegram_id(telegram_id)
         if not user or user.status != UserStatus.PENDING:
             return None
+
+        if initial_credits is None:
+            from bot.services.plan_service import PlanService
+            ps = PlanService(self.session)
+            initial_credits = await ps.get_initial_credits()
 
         user.status = UserStatus.APPROVED
         user.credits = initial_credits
@@ -91,7 +112,7 @@ class UserService:
         await self.session.flush()
         return True
 
-    async def request_recharge(self, telegram_id: int, amount: int) -> Optional[RechargeRequest]:
+    async def request_recharge(self, telegram_id: int, amount: int, plan_id: Optional[int] = None) -> Optional[RechargeRequest]:
         user = await self.get_user_by_telegram_id(telegram_id)
         if not user:
             return None
@@ -108,6 +129,7 @@ class UserService:
         req = RechargeRequest(
             user_id=user.id,
             requested_credits=amount,
+            plan_id=plan_id,
             status=RechargeStatus.PENDING
         )
         self.session.add(req)
@@ -133,20 +155,39 @@ class UserService:
         stmt = select(User).where(User.id == req.user_id)
         user = (await self.session.execute(stmt)).scalar_one_or_none()
         if user:
-            # Special packages: -1 = 1 Day Unlimited, -7 = 7 Days Unlimited
-            if approved_amount == -1:
-                now = datetime.datetime.now(datetime.timezone.utc)
-                start_time = max(now, user.subscription_end) if user.subscription_end else now
-                user.subscription_end = start_time + datetime.timedelta(days=1)
-                tx_amount = 0 # No credit change
-            elif approved_amount == -7:
-                now = datetime.datetime.now(datetime.timezone.utc)
-                start_time = max(now, user.subscription_end) if user.subscription_end else now
-                user.subscription_end = start_time + datetime.timedelta(days=7)
-                tx_amount = 0 # No credit change
+            # Check if associated with a dynamic Plan
+            plan = None
+            if req.plan_id:
+                from bot.services.plan_service import PlanService
+                from bot.models.models import PlanType
+                ps = PlanService(self.session)
+                plan = await ps.get_plan_by_id(req.plan_id)
+
+            if plan:
+                from bot.models.models import PlanType
+                if plan.plan_type == PlanType.DAYS:
+                    now = datetime.datetime.now(datetime.timezone.utc)
+                    start_time = max(now, user.subscription_end) if user.subscription_end else now
+                    user.subscription_end = start_time + datetime.timedelta(days=plan.days)
+                    tx_amount = 0
+                else:
+                    user.credits += plan.credits
+                    tx_amount = plan.credits
             else:
-                user.credits += approved_amount
-                tx_amount = approved_amount
+                # Special legacy packages: -1 = 1 Day Unlimited, -7 = 7 Days Unlimited
+                if approved_amount == -1:
+                    now = datetime.datetime.now(datetime.timezone.utc)
+                    start_time = max(now, user.subscription_end) if user.subscription_end else now
+                    user.subscription_end = start_time + datetime.timedelta(days=1)
+                    tx_amount = 0 # No credit change
+                elif approved_amount == -7:
+                    now = datetime.datetime.now(datetime.timezone.utc)
+                    start_time = max(now, user.subscription_end) if user.subscription_end else now
+                    user.subscription_end = start_time + datetime.timedelta(days=7)
+                    tx_amount = 0 # No credit change
+                else:
+                    user.credits += approved_amount
+                    tx_amount = approved_amount
 
             tx = CreditTransaction(
                 user_id=user.id,

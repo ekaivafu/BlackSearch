@@ -1,8 +1,12 @@
 import datetime
-from sqlalchemy import BigInteger, Column, Integer, String, DateTime, ForeignKey, Enum, JSON, text
+from sqlalchemy import BigInteger, Column, Integer, String, DateTime, ForeignKey, Enum, JSON, Boolean, text
 from sqlalchemy.sql import func
 from .base import Base
 import enum
+
+class PlanType(str, enum.Enum):
+    CREDITS = "credits"
+    DAYS = "days"
 
 class UserStatus(str, enum.Enum):
     PENDING = "pending"
@@ -20,6 +24,27 @@ class TransactionType(str, enum.Enum):
     SEARCH = "search"
     RECHARGE = "recharge"
     ADMIN_ADJUSTMENT = "admin_adjustment"
+
+class Plan(Base):
+    __tablename__ = "plans"
+
+    id = Column(Integer, primary_key=True, index=True)
+    name = Column(String, nullable=False)
+    plan_type = Column(Enum(PlanType), nullable=False)
+    credits = Column(Integer, default=0, nullable=False)
+    days = Column(Integer, default=0, nullable=False)
+    price = Column(Integer, default=0, nullable=False)
+    is_active = Column(Boolean, default=True, nullable=False)
+
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    updated_at = Column(DateTime(timezone=True), onupdate=func.now())
+
+class BotSetting(Base):
+    __tablename__ = "bot_settings"
+
+    key = Column(String, primary_key=True, index=True)
+    value = Column(String, nullable=False)
+    updated_at = Column(DateTime(timezone=True), onupdate=func.now())
 
 class User(Base):
     __tablename__ = "users"
@@ -46,6 +71,7 @@ class RechargeRequest(Base):
     user_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
     requested_credits = Column(Integer, nullable=False)
     status = Column(Enum(RechargeStatus), default=RechargeStatus.PENDING, nullable=False)
+    plan_id = Column(Integer, ForeignKey("plans.id", ondelete="SET NULL"), nullable=True)
     
     requested_at = Column(DateTime(timezone=True), server_default=func.now())
     processed_at = Column(DateTime(timezone=True), nullable=True)

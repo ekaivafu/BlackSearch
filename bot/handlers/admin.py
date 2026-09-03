@@ -1,23 +1,32 @@
-
-# pyrefly: ignore [missing-import]
 from aiogram import Router, F, Bot
-# pyrefly: ignore [missing-import]
 from aiogram.filters import Command
-# pyrefly: ignore [missing-import]
 from aiogram.types import Message, CallbackQuery, BufferedInputFile
 from sqlalchemy.ext.asyncio import AsyncSession
-# pyrefly: ignore [missing-import]
 from aiogram.fsm.state import State, StatesGroup
-# pyrefly: ignore [missing-import]
 from aiogram.fsm.context import FSMContext
 from bot.services.user_service import UserService
-from bot.models.models import TransactionType, CreditTransaction, User, RechargeStatus, UserStatus
+from bot.services.plan_service import PlanService
+from bot.models.models import TransactionType, CreditTransaction, User, RechargeStatus, UserStatus, Plan, PlanType
 from bot.config import config
-from bot.keyboards.inline import get_recharge_approval_keyboard
+from bot.keyboards.inline import (
+    get_recharge_approval_keyboard,
+    get_admin_plans_keyboard,
+    get_plan_type_selection_keyboard,
+    get_plans_selection_keyboard,
+    get_plan_edit_fields_keyboard,
+    get_plan_delete_confirm_keyboard,
+)
 import datetime
 
 class AdminStates(StatesGroup):
     pass
+
+class PlanAdminStates(StatesGroup):
+    create_value = State()
+    create_price = State()
+    create_name = State()
+    edit_value = State()
+    free_credits = State()
 
 router = Router()
 
@@ -256,12 +265,16 @@ async def btn_manage_points(message: Message):
     if not is_admin(message.from_user.id):
         return
     await message.answer(
-        "**Manage Points**\n\n"
-        "To add credits to a user manually, type:\n"
-        "`/addcredit <user_id> <amount>`\n\n"
-        "Example: `/addcredit 123456789 50`\n\n"
-        "When users request a recharge, a button will appear in this chat for you to approve.",
-        parse_mode="Markdown"
+        "<b>💰 Manage Points & Plans</b>\n\n"
+        "• To add credits manually:\n"
+        "  <code>/addcredit &lt;user_id&gt; &lt;amount&gt;</code>\n"
+        "  <i>Example: /addcredit 123456789 50</i>\n\n"
+        "• To manage subscription & credit packages:\n"
+        "  Type <code>/plans</code> or click <b>📦 Manage Plans</b> below.\n\n"
+        "• To change new user free credits:\n"
+        "  <code>/freecredits</code>\n\n"
+        "When users request a recharge, approval buttons appear here automatically.",
+        parse_mode="HTML"
     )
 
 @router.callback_query(F.data.startswith("approve_"))
@@ -271,12 +284,14 @@ async def cb_approve_user(callback: CallbackQuery, session: AsyncSession, bot: B
     
     target_id = int(callback.data.split("_")[1])
     user_service = UserService(session)
+    plan_service = PlanService(session)
+    free_credits = await plan_service.get_initial_credits()
     
-    user = await user_service.approve_user(target_id, callback.from_user.id, config.initial_credits)
+    user = await user_service.approve_user(target_id, callback.from_user.id, free_credits)
     if user:
-        await callback.message.edit_text(f"User {target_id} approved.")
+        await callback.message.edit_text(f"User {target_id} approved with {free_credits} free credits.")
         try:
-            await bot.send_message(target_id, f"Your access request has been approved! You have {config.initial_credits} credits.")
+            await bot.send_message(target_id, f"Your access request has been approved! You have {free_credits} credits.")
         except Exception:
             pass
     else:
@@ -310,15 +325,22 @@ async def cb_approve_recharge(callback: CallbackQuery, session: AsyncSession, bo
     req_id = int(callback.data.split("_")[2])
     
     user_service = UserService(session)
+    plan_service = PlanService(session)
     req = await user_service.get_recharge_request(req_id)
     if not req or req.status != RechargeStatus.PENDING:
         return await callback.message.edit_text(f"Recharge #{req_id} already processed or not found.")
         
     amount = req.requested_credits
-    req = await user_service.approve_recharge(req_id, callback.from_user.id, amount)
+    plan = None
+    if req.plan_id:
+        plan = await plan_service.get_plan_by_id(req.plan_id)
+
+    approved_req = await user_service.approve_recharge(req_id, callback.from_user.id, amount)
     
-    if req:
-        if amount == -1: pkg = "1 Day Unlimited"
+    if approved_req:
+        if plan:
+            pkg = f"{plan.name} (₹{plan.price})"
+        elif amount == -1: pkg = "1 Day Unlimited"
         elif amount == -7: pkg = "7 Days Unlimited"
         else: pkg = f"{amount} credits"
         
@@ -439,3 +461,504 @@ async def cmd_broadcast(message: Message, session: AsyncSession, bot: Bot):
             failed += 1
             
     await message.answer(f"✅ Broadcast complete.\nSent: {sent}\nFailed: {failed}")
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 📦 Plan Management Dashboard & Handlers
+# ─────────────────────────────────────────────────────────────────────────────
+
+async def _build_plans_dashboard_text(session: AsyncSession) -> str:
+    ps = PlanService(session)
+    plans = await ps.get_all_plans(active_only=True)
+    free_credits = await ps.get_initial_credits()
+
+    lines = [
+        "📦 <b>Plan Management Dashboard</b>\n",
+        f"🎁 <b>New User Free Credits:</b> <code>{free_credits}</code> credits\n",
+        "📋 <b>Active Subscription & Credit Plans:</b>"
+    ]
+    if not plans:
+        lines.append("<i>No active plans found. Click '➕ Create Plan' below to add one!</i>")
+    else:
+        for i, p in enumerate(plans, 1):
+            if p.plan_type == PlanType.CREDITS or (hasattr(p.plan_type, "value") and p.plan_type.value == "credits"):
+                detail = f"{p.credits} searches"
+                icon = "🪙"
+            else:
+                detail = f"{p.days} days unlimited"
+                icon = "👑"
+            lines.append(f"{i}. {icon} <b>{p.name}</b> — <b>₹{p.price}</b> (<code>{detail}</code>) [ID: <code>{p.id}</code>]")
+
+    lines.append(
+        "\n<i>Quick Commands:</i>\n"
+        "• /createplan — Create a new plan\n"
+        "• /editplan — Edit an existing plan\n"
+        "• /deleteplan — Delete a plan\n"
+        "• /freecredits — Change new user free credits"
+    )
+    return "\n".join(lines)
+
+@router.message(F.text == "📦 Manage Plans")
+@router.message(Command("plans"))
+@router.message(Command("manageplans"))
+async def cmd_manage_plans(message: Message, session: AsyncSession, state: FSMContext):
+    if not is_admin(message.from_user.id):
+        return
+    await state.clear()
+    text = await _build_plans_dashboard_text(session)
+    await message.answer(text, reply_markup=get_admin_plans_keyboard(), parse_mode="HTML")
+
+@router.callback_query(F.data == "admin_plans_refresh")
+async def cb_plans_refresh(callback: CallbackQuery, session: AsyncSession, state: FSMContext):
+    if not is_admin(callback.from_user.id):
+        return await callback.answer("Unauthorized.", show_alert=True)
+    await state.clear()
+    text = await _build_plans_dashboard_text(session)
+    try:
+        await callback.message.edit_text(text, reply_markup=get_admin_plans_keyboard(), parse_mode="HTML")
+    except Exception:
+        await callback.message.answer(text, reply_markup=get_admin_plans_keyboard(), parse_mode="HTML")
+    await callback.answer("Dashboard refreshed")
+
+@router.callback_query(F.data == "admin_plan_close")
+async def cb_plan_close(callback: CallbackQuery, state: FSMContext):
+    if not is_admin(callback.from_user.id):
+        return await callback.answer("Unauthorized.", show_alert=True)
+    await state.clear()
+    try:
+        await callback.message.delete()
+    except Exception:
+        await callback.message.edit_text("Closed.")
+    await callback.answer()
+
+@router.callback_query(F.data == "plan_cancel")
+async def cb_plan_cancel(callback: CallbackQuery, session: AsyncSession, state: FSMContext):
+    if not is_admin(callback.from_user.id):
+        return await callback.answer("Unauthorized.", show_alert=True)
+    await state.clear()
+    text = await _build_plans_dashboard_text(session)
+    await callback.message.edit_text(text, reply_markup=get_admin_plans_keyboard(), parse_mode="HTML")
+    await callback.answer("Cancelled.")
+
+# ── ➕ CREATE PLAN ────────────────────────────────────────────────────────────
+
+@router.message(Command("createplan"))
+async def cmd_createplan(message: Message, state: FSMContext):
+    if not is_admin(message.from_user.id):
+        return
+    await state.clear()
+    await message.answer(
+        "➕ <b>Create a New Plan</b>\n\nChoose the plan type:",
+        reply_markup=get_plan_type_selection_keyboard(),
+        parse_mode="HTML"
+    )
+
+@router.callback_query(F.data == "admin_plan_create")
+async def cb_plan_create(callback: CallbackQuery, state: FSMContext):
+    if not is_admin(callback.from_user.id):
+        return await callback.answer("Unauthorized.", show_alert=True)
+    await state.clear()
+    await callback.message.edit_text(
+        "➕ <b>Create a New Plan</b>\n\nChoose the plan type:",
+        reply_markup=get_plan_type_selection_keyboard(),
+        parse_mode="HTML"
+    )
+    await callback.answer()
+
+@router.callback_query(F.data == "create_type_credits")
+async def cb_create_type_credits(callback: CallbackQuery, state: FSMContext):
+    if not is_admin(callback.from_user.id):
+        return await callback.answer("Unauthorized.", show_alert=True)
+    await state.update_data(plan_type="credits")
+    await state.set_state(PlanAdminStates.create_value)
+    await callback.message.edit_text(
+        "🪙 <b>Step 1/3: Number of Searches / Credits</b>\n\n"
+        "How many search credits should this plan grant to the user?\n"
+        "<i>Example: 20, 50, 100</i>\n\n"
+        "Send /cancel to abort.",
+        parse_mode="HTML"
+    )
+    await callback.answer()
+
+@router.callback_query(F.data == "create_type_days")
+async def cb_create_type_days(callback: CallbackQuery, state: FSMContext):
+    if not is_admin(callback.from_user.id):
+        return await callback.answer("Unauthorized.", show_alert=True)
+    await state.update_data(plan_type="days")
+    await state.set_state(PlanAdminStates.create_value)
+    await callback.message.edit_text(
+        "👑 <b>Step 1/3: Duration in Days</b>\n\n"
+        "How many days of <b>Unlimited Searches</b> should this plan grant?\n"
+        "<i>Example: 1, 7, 30</i>\n\n"
+        "Send /cancel to abort.",
+        parse_mode="HTML"
+    )
+    await callback.answer()
+
+@router.message(PlanAdminStates.create_value)
+async def process_create_plan_value(message: Message, state: FSMContext):
+    if not is_admin(message.from_user.id):
+        return
+    text = message.text.strip()
+    if text == "/cancel":
+        await state.clear()
+        return await message.answer("Creation cancelled.")
+    if not text.isdigit() or int(text) <= 0:
+        return await message.answer("⚠️ Please enter a valid positive number (e.g. 15, 30):")
+    
+    val = int(text)
+    data = await state.get_data()
+    plan_type = data.get("plan_type", "credits")
+    await state.update_data(amount=val)
+    await state.set_state(PlanAdminStates.create_price)
+
+    type_desc = f"{val} searches" if plan_type == "credits" else f"{val} days unlimited"
+    await message.answer(
+        f"✅ Selected: <b>{type_desc}</b>\n\n"
+        "💰 <b>Step 2/3: Price in ₹</b>\n"
+        "Enter the price for this plan in ₹ (INR):\n"
+        "<i>Example: 50, 100, 499</i>",
+        parse_mode="HTML"
+    )
+
+@router.message(PlanAdminStates.create_price)
+async def process_create_plan_price(message: Message, state: FSMContext):
+    if not is_admin(message.from_user.id):
+        return
+    text = message.text.strip()
+    if text == "/cancel":
+        await state.clear()
+        return await message.answer("Creation cancelled.")
+    if not text.isdigit() or int(text) < 0:
+        return await message.answer("⚠️ Please enter a valid non-negative number for price in ₹ (e.g. 100):")
+    
+    price = int(text)
+    data = await state.get_data()
+    plan_type = data.get("plan_type", "credits")
+    amount = data.get("amount", 1)
+    
+    if plan_type == "credits":
+        default_name = f"₹{price} for {amount} searches"
+    else:
+        unit = "day" if amount == 1 else "days"
+        default_name = f"₹{price} for {amount} {unit} unlimited"
+        
+    await state.update_data(price=price, default_name=default_name)
+    await state.set_state(PlanAdminStates.create_name)
+
+    await message.answer(
+        f"💰 Price set to: <b>₹{price}</b>\n\n"
+        "🏷️ <b>Step 3/3: Plan Display Title</b>\n"
+        f"Default title: <code>{default_name}</code>\n\n"
+        "Send <b>/skip</b> to use the default title, or type your own custom title (e.g. <i>Weekend Pass</i>):",
+        parse_mode="HTML"
+    )
+
+@router.message(PlanAdminStates.create_name)
+async def process_create_plan_name(message: Message, session: AsyncSession, state: FSMContext):
+    if not is_admin(message.from_user.id):
+        return
+    text = message.text.strip()
+    if text == "/cancel":
+        await state.clear()
+        return await message.answer("Creation cancelled.")
+        
+    data = await state.get_data()
+    plan_type_str = data.get("plan_type", "credits")
+    amount = data.get("amount", 0)
+    price = data.get("price", 0)
+    default_name = data.get("default_name", "Package")
+    
+    final_name = default_name if text == "/skip" else text
+    await state.clear()
+    
+    ps = PlanService(session)
+    pt = PlanType.CREDITS if plan_type_str == "credits" else PlanType.DAYS
+    credits_val = amount if pt == PlanType.CREDITS else 0
+    days_val = amount if pt == PlanType.DAYS else 0
+    
+    plan = await ps.create_plan(
+        name=final_name,
+        plan_type=pt,
+        credits=credits_val,
+        days=days_val,
+        price=price
+    )
+    
+    type_line = f"🪙 <b>Credits:</b> {plan.credits} searches" if pt == PlanType.CREDITS else f"👑 <b>Duration:</b> {plan.days} days unlimited"
+    await message.answer(
+        "🎉 <b>New Plan Successfully Created!</b>\n\n"
+        f"🏷️ <b>Title:</b> {plan.name}\n"
+        f"💎 <b>Type:</b> {pt.value.capitalize()}\n"
+        f"{type_line}\n"
+        f"💰 <b>Price:</b> ₹{plan.price}\n\n"
+        "<i>This package is now available for users in /recharge.</i>",
+        reply_markup=get_admin_plans_keyboard(),
+        parse_mode="HTML"
+    )
+
+# ── ✏️ EDIT PLAN ──────────────────────────────────────────────────────────────
+
+@router.message(Command("editplan"))
+@router.message(Command("edit"))
+async def cmd_editplan(message: Message, session: AsyncSession, state: FSMContext):
+    if not is_admin(message.from_user.id):
+        return
+    await state.clear()
+    ps = PlanService(session)
+    plans = await ps.get_all_plans(active_only=True)
+    if not plans:
+        return await message.answer("❌ No active plans found to edit.")
+    await message.answer(
+        "✏️ <b>Select a plan to edit:</b>",
+        reply_markup=get_plans_selection_keyboard(plans, "admin_edit_plan"),
+        parse_mode="HTML"
+    )
+
+@router.callback_query(F.data == "admin_plan_list_edit")
+async def cb_plan_list_edit(callback: CallbackQuery, session: AsyncSession, state: FSMContext):
+    if not is_admin(callback.from_user.id):
+        return await callback.answer("Unauthorized.", show_alert=True)
+    await state.clear()
+    ps = PlanService(session)
+    plans = await ps.get_all_plans(active_only=True)
+    if not plans:
+        return await callback.message.edit_text(
+            "❌ No active plans found to edit.",
+            reply_markup=get_admin_plans_keyboard()
+        )
+    await callback.message.edit_text(
+        "✏️ <b>Select a plan to edit:</b>",
+        reply_markup=get_plans_selection_keyboard(plans, "admin_edit_plan"),
+        parse_mode="HTML"
+    )
+    await callback.answer()
+
+@router.callback_query(F.data.startswith("admin_edit_plan_"))
+async def cb_edit_plan_select(callback: CallbackQuery, session: AsyncSession, state: FSMContext):
+    if not is_admin(callback.from_user.id):
+        return await callback.answer("Unauthorized.", show_alert=True)
+    plan_id = int(callback.data.split("_")[3])
+    ps = PlanService(session)
+    plan = await ps.get_plan_by_id(plan_id)
+    if not plan or not plan.is_active:
+        return await callback.answer("Plan not found.", show_alert=True)
+        
+    is_cred = plan.plan_type == PlanType.CREDITS or (hasattr(plan.plan_type, "value") and plan.plan_type.value == "credits")
+    detail = f"{plan.credits} searches" if is_cred else f"{plan.days} days unlimited"
+    
+    text = (
+        f"✏️ <b>Edit Plan #{plan.id}</b>\n\n"
+        f"🏷️ <b>Name:</b> {plan.name}\n"
+        f"💎 <b>Type:</b> {plan.plan_type.value.capitalize()} ({detail})\n"
+        f"💰 <b>Price:</b> ₹{plan.price}\n\n"
+        "Choose what you would like to edit below:"
+    )
+    await callback.message.edit_text(text, reply_markup=get_plan_edit_fields_keyboard(plan), parse_mode="HTML")
+    await callback.answer()
+
+@router.callback_query(F.data.startswith("plan_field_"))
+async def cb_plan_field_select(callback: CallbackQuery, session: AsyncSession, state: FSMContext):
+    if not is_admin(callback.from_user.id):
+        return await callback.answer("Unauthorized.", show_alert=True)
+    parts = callback.data.split("_")
+    field = parts[2] # "name", "price", "val"
+    plan_id = int(parts[3])
+    
+    ps = PlanService(session)
+    plan = await ps.get_plan_by_id(plan_id)
+    if not plan or not plan.is_active:
+        return await callback.answer("Plan not found.", show_alert=True)
+        
+    await state.update_data(edit_plan_id=plan_id, edit_field=field)
+    await state.set_state(PlanAdminStates.edit_value)
+    
+    if field == "name":
+        prompt = f"🏷️ Current name: <code>{plan.name}</code>\n\nEnter the new display title for this plan:"
+    elif field == "price":
+        prompt = f"💰 Current price: <b>₹{plan.price}</b>\n\nEnter the new price in ₹ (e.g. 150):"
+    else: # "val"
+        is_cred = plan.plan_type == PlanType.CREDITS or (hasattr(plan.plan_type, "value") and plan.plan_type.value == "credits")
+        if is_cred:
+            prompt = f"🪙 Current credits: <b>{plan.credits}</b> searches\n\nEnter the new number of search credits:"
+        else:
+            prompt = f"👑 Current duration: <b>{plan.days}</b> days\n\nEnter the new duration in days:"
+            
+    prompt += "\n\n<i>Send /cancel to abort.</i>"
+    await callback.message.edit_text(prompt, parse_mode="HTML")
+    await callback.answer()
+
+@router.message(PlanAdminStates.edit_value)
+async def process_edit_plan_value(message: Message, session: AsyncSession, state: FSMContext):
+    if not is_admin(message.from_user.id):
+        return
+    text = message.text.strip()
+    if text == "/cancel":
+        await state.clear()
+        return await message.answer("Edit cancelled.")
+        
+    data = await state.get_data()
+    plan_id = data.get("edit_plan_id")
+    field = data.get("edit_field")
+    await state.clear()
+    
+    ps = PlanService(session)
+    plan = await ps.get_plan_by_id(plan_id)
+    if not plan:
+        return await message.answer("❌ Plan not found.")
+        
+    is_cred = plan.plan_type == PlanType.CREDITS or (hasattr(plan.plan_type, "value") and plan.plan_type.value == "credits")
+    
+    if field == "name":
+        await ps.update_plan(plan_id, name=text)
+    elif field == "price":
+        if not text.isdigit() or int(text) < 0:
+            return await message.answer("⚠️ Invalid price. Must be a non-negative number.")
+        await ps.update_plan(plan_id, price=int(text))
+    elif field == "val":
+        if not text.isdigit() or int(text) <= 0:
+            return await message.answer("⚠️ Invalid number. Must be a positive integer.")
+        if is_cred:
+            await ps.update_plan(plan_id, credits=int(text))
+        else:
+            await ps.update_plan(plan_id, days=int(text))
+            
+    updated_plan = await ps.get_plan_by_id(plan_id)
+    detail = f"{updated_plan.credits} searches" if is_cred else f"{updated_plan.days} days unlimited"
+    
+    await message.answer(
+        f"✅ <b>Plan Updated Successfully!</b>\n\n"
+        f"🏷️ <b>Name:</b> {updated_plan.name}\n"
+        f"💎 <b>Type:</b> {updated_plan.plan_type.value.capitalize()} ({detail})\n"
+        f"💰 <b>Price:</b> ₹{updated_plan.price}",
+        reply_markup=get_plan_edit_fields_keyboard(updated_plan),
+        parse_mode="HTML"
+    )
+
+# ── 🗑️ DELETE PLAN ────────────────────────────────────────────────────────────
+
+@router.message(Command("deleteplan"))
+@router.message(Command("delete"))
+async def cmd_deleteplan(message: Message, session: AsyncSession, state: FSMContext):
+    if not is_admin(message.from_user.id):
+        return
+    await state.clear()
+    ps = PlanService(session)
+    plans = await ps.get_all_plans(active_only=True)
+    if not plans:
+        return await message.answer("❌ No active plans found to delete.")
+    await message.answer(
+        "🗑️ <b>Select a plan to delete:</b>",
+        reply_markup=get_plans_selection_keyboard(plans, "admin_del_plan"),
+        parse_mode="HTML"
+    )
+
+@router.callback_query(F.data == "admin_plan_list_delete")
+async def cb_plan_list_delete(callback: CallbackQuery, session: AsyncSession, state: FSMContext):
+    if not is_admin(callback.from_user.id):
+        return await callback.answer("Unauthorized.", show_alert=True)
+    await state.clear()
+    ps = PlanService(session)
+    plans = await ps.get_all_plans(active_only=True)
+    if not plans:
+        return await callback.message.edit_text(
+            "❌ No active plans found to delete.",
+            reply_markup=get_admin_plans_keyboard()
+        )
+    await callback.message.edit_text(
+        "🗑️ <b>Select a plan to delete:</b>",
+        reply_markup=get_plans_selection_keyboard(plans, "admin_del_plan"),
+        parse_mode="HTML"
+    )
+    await callback.answer()
+
+@router.callback_query(F.data.startswith("admin_del_plan_"))
+async def cb_delete_plan_select(callback: CallbackQuery, session: AsyncSession):
+    if not is_admin(callback.from_user.id):
+        return await callback.answer("Unauthorized.", show_alert=True)
+    plan_id = int(callback.data.split("_")[3])
+    ps = PlanService(session)
+    plan = await ps.get_plan_by_id(plan_id)
+    if not plan or not plan.is_active:
+        return await callback.answer("Plan not found.", show_alert=True)
+        
+    await callback.message.edit_text(
+        f"⚠️ <b>Are you sure you want to delete this plan?</b>\n\n"
+        f"📦 <b>{plan.name}</b> — ₹{plan.price}\n\n"
+        "<i>Users will immediately stop seeing this plan in /recharge.</i>",
+        reply_markup=get_plan_delete_confirm_keyboard(plan.id),
+        parse_mode="HTML"
+    )
+    await callback.answer()
+
+@router.callback_query(F.data.startswith("do_delete_plan_"))
+async def cb_do_delete_plan(callback: CallbackQuery, session: AsyncSession):
+    if not is_admin(callback.from_user.id):
+        return await callback.answer("Unauthorized.", show_alert=True)
+    plan_id = int(callback.data.split("_")[3])
+    ps = PlanService(session)
+    plan = await ps.get_plan_by_id(plan_id)
+    name = plan.name if plan else f"#{plan_id}"
+    await ps.delete_plan(plan_id)
+    
+    text = f"✅ Plan <b>{name}</b> has been deleted.\n\n" + await _build_plans_dashboard_text(session)
+    await callback.message.edit_text(text, reply_markup=get_admin_plans_keyboard(), parse_mode="HTML")
+    await callback.answer("Plan deleted!")
+
+# ── 🎁 EDIT FREE CREDITS FOR NEW USERS ───────────────────────────────────────
+
+@router.message(Command("freecredits"))
+async def cmd_freecredits(message: Message, session: AsyncSession, state: FSMContext):
+    if not is_admin(message.from_user.id):
+        return
+    await state.clear()
+    ps = PlanService(session)
+    cur_cred = await ps.get_initial_credits()
+    await state.set_state(PlanAdminStates.free_credits)
+    await message.answer(
+        f"🎁 <b>Edit New User Free Credits</b>\n\n"
+        f"Currently, newly approved/registered users receive: <code>{cur_cred}</code> free credits.\n\n"
+        "Send the new number of free credits to give to new users:\n"
+        "<i>(Enter 0 for no free credits, or 5, 10, etc.)\nSend /cancel to abort.</i>",
+        parse_mode="HTML"
+    )
+
+@router.callback_query(F.data == "admin_edit_free_credits")
+async def cb_edit_free_credits(callback: CallbackQuery, session: AsyncSession, state: FSMContext):
+    if not is_admin(callback.from_user.id):
+        return await callback.answer("Unauthorized.", show_alert=True)
+    await state.clear()
+    ps = PlanService(session)
+    cur_cred = await ps.get_initial_credits()
+    await state.set_state(PlanAdminStates.free_credits)
+    await callback.message.edit_text(
+        f"🎁 <b>Edit New User Free Credits</b>\n\n"
+        f"Currently, newly approved/registered users receive: <code>{cur_cred}</code> free credits.\n\n"
+        "Send the new number of free credits to give to new users:\n"
+        "<i>(Enter 0 for no free credits, or 5, 10, etc.)\nSend /cancel to abort.</i>",
+        parse_mode="HTML"
+    )
+    await callback.answer()
+
+@router.message(PlanAdminStates.free_credits)
+async def process_free_credits_value(message: Message, session: AsyncSession, state: FSMContext):
+    if not is_admin(message.from_user.id):
+        return
+    text = message.text.strip()
+    if text == "/cancel":
+        await state.clear()
+        return await message.answer("Operation cancelled.")
+    if not text.isdigit() or int(text) < 0:
+        return await message.answer("⚠️ Please enter a valid non-negative number (e.g. 0, 5, 10):")
+        
+    val = int(text)
+    await state.clear()
+    ps = PlanService(session)
+    await ps.set_initial_credits(val)
+    
+    await message.answer(
+        f"✅ <b>Free Credits Updated!</b>\n\n"
+        f"All newly joined/approved users will now receive <b>{val}</b> free search credits.",
+        reply_markup=get_admin_plans_keyboard(),
+        parse_mode="HTML"
+    )
+

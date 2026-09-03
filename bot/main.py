@@ -7,7 +7,7 @@ load_dotenv(os.path.join(os.path.dirname(__file__), ".env"))
 from aiogram import Bot, Dispatcher
 from aiogram.fsm.storage.memory import MemoryStorage
 from bot.config import config
-from bot.database.session import async_session
+from bot.database.session import async_session, init_db
 from bot.middleware.db import DbSessionMiddleware
 from bot.middleware.auth import ThrottlingMiddleware
 from bot.handlers import user, admin
@@ -46,6 +46,9 @@ async def main():
     dp.include_router(user.router)
     dp.include_router(admin.router)
     
+    # Database auto-migration and plan seeding
+    await init_db()
+
     logger.info("Starting bot...")
     await dp.start_polling(bot)
 
