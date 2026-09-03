@@ -4,7 +4,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, delete
 from aiogram import Bot
 from aiogram.exceptions import TelegramBadRequest, TelegramForbiddenError, TelegramAPIError
-from bot.models.models import RequiredChannel
+from bot.models.models import RequiredChannel, User
 
 logger = logging.getLogger(__name__)
 
@@ -148,3 +148,70 @@ class ChannelService:
 
         except Exception as e:
             return False, f"Failed to check bot permissions: {str(e)}", {}
+
+    @staticmethod
+    async def notify_admins_new_user_verified(bot: Bot, session: AsyncSession, user: User) -> None:
+        """
+        Sends a detailed notification card to all bot admins when a new user
+        successfully verifies required channel membership.
+        """
+        import html
+        import datetime
+        from sqlalchemy import func
+        from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
+        from bot.config import config
+
+        if user.is_channel_verified:
+            return  # Already verified and notified earlier
+
+        # Mark as verified
+        user.is_channel_verified = True
+        await session.flush()
+
+        # Count total users in database
+        stmt = select(func.count(User.id))
+        total_users = (await session.execute(stmt)).scalar() or 1
+
+        ist_tz = datetime.timezone(datetime.timedelta(hours=5, minutes=30))
+        verified_at = datetime.datetime.now(ist_tz).strftime("%d %b %Y, %I:%M:%S %p")
+
+        name = html.escape(f"{user.first_name or ''} {user.last_name or ''}".strip() or "Anonymous")
+        username_text = f"@{html.escape(user.username)}" if user.username else "<i>None</i>"
+        bonus_text = f"+{user.bonus_credits} credits (expires 23:59 IST)" if user.bonus_credits > 0 else "0 credits"
+
+        admin_msg = (
+            "🎉 <b>NEW USER VERIFIED &amp; ACCESS UNLOCKED!</b>\n"
+            "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+            "A new user has joined your required channel(s) and passed verification.\n\n"
+            "👤 <b>User Profile:</b>\n"
+            f"├ 👤 <b>Name:</b> <b>{name}</b>\n"
+            f"├ 🔗 <b>Username:</b> {username_text}\n"
+            f"├ 🆔 <b>User ID:</b> <code>{user.telegram_user_id}</code>\n"
+            f"└ 📱 <b>Profile Link:</b> <a href=\"tg://user?id={user.telegram_user_id}\">Open Telegram Chat</a>\n\n"
+            "📊 <b>Account Metrics:</b>\n"
+            f"├ 🛡️ <b>Status:</b> <code>APPROVED &amp; ACTIVE</code>\n"
+            f"├ 🎁 <b>Daily Bonus:</b> <code>{bonus_text}</code>\n"
+            f"├ 👥 <b>Total Bot Users:</b> <code>{total_users}</code> users\n"
+            f"└ 🕒 <b>Verified At:</b> <code>{verified_at} IST</code>\n"
+            "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+        )
+
+        kb = InlineKeyboardMarkup(inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text="👤 View User Profile",
+                    url=f"tg://user?id={user.telegram_user_id}"
+                )
+            ]
+        ])
+
+        for admin_id in config.admin_ids:
+            try:
+                await bot.send_message(
+                    chat_id=admin_id,
+                    text=admin_msg,
+                    reply_markup=kb,
+                    parse_mode="HTML"
+                )
+            except Exception as e:
+                logger.debug(f"Failed to send new user alert to admin {admin_id}: {e}")

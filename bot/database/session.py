@@ -1,8 +1,11 @@
+import logging
 from sqlalchemy.ext.asyncio import create_async_engine, async_sessionmaker, AsyncSession
 from sqlalchemy import text
 from bot.config import config
 from bot.models.base import Base
 import bot.models.models # Ensure all models are registered with Base.metadata
+
+logger = logging.getLogger(__name__)
 
 engine = create_async_engine(
     config.database_url,
@@ -32,7 +35,7 @@ async def init_db():
     # Raw connection for DDL migrations runs outside transaction pooling to avoid lock conflicts
     raw_url = config.database_url.replace("postgresql+asyncpg://", "postgresql://")
     try:
-        raw_conn = await asyncpg.connect(raw_url)
+        raw_conn = await asyncpg.connect(raw_url, ssl="require")
         try:
             await raw_conn.execute("ALTER TYPE transactiontype ADD VALUE IF NOT EXISTS 'DAILY_BONUS';")
         except Exception:
@@ -42,6 +45,7 @@ async def init_db():
             await raw_conn.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS bonus_credits INTEGER DEFAULT 0;")
             await raw_conn.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS bonus_credits_expire_at TIMESTAMP WITH TIME ZONE;")
             await raw_conn.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS last_daily_bonus_date DATE;")
+            await raw_conn.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS is_channel_verified BOOLEAN DEFAULT FALSE;")
         except Exception:
             pass
         finally:

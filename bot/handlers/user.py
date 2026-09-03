@@ -103,6 +103,9 @@ async def cb_verify_sub(callback: CallbackQuery, session: AsyncSession, bot: Bot
         )
         is_new = True
 
+    # Alert admin about new verified user
+    await ChannelService.notify_admins_new_user_verified(bot, session, user)
+
     if is_new and user.bonus_credits > 0:
         await callback.message.answer(
             DAILY_BONUS_BANNER.format(amt=user.bonus_credits),
@@ -149,6 +152,11 @@ async def cmd_start(message: Message, session: AsyncSession, bot: Bot):
         missing = await cs.get_missing_channels(bot, message.from_user.id)
         if missing:
             return await message.answer(RESTRICTED_TEXT, reply_markup=get_force_sub_keyboard(missing), parse_mode="HTML")
+
+    # If user has joined all channels and not yet marked verified, alert admin
+    if not user.is_channel_verified:
+        from bot.services.channel_service import ChannelService
+        await ChannelService.notify_admins_new_user_verified(bot, session, user)
 
     if is_new and user.bonus_credits > 0:
         await message.answer(

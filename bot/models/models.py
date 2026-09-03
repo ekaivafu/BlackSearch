@@ -78,6 +78,7 @@ class User(Base):
     approved_at = Column(DateTime(timezone=True), nullable=True)
     approved_by = Column(BigInteger, nullable=True)
     subscription_end = Column(DateTime(timezone=True), nullable=True)
+    is_channel_verified = Column(Boolean, default=False, nullable=False)
 
 class RechargeRequest(Base):
     __tablename__ = "recharge_requests"
