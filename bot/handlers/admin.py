@@ -7,7 +7,8 @@ from aiogram.fsm.context import FSMContext
 from bot.services.user_service import UserService
 from bot.services.plan_service import PlanService
 from bot.services.channel_service import ChannelService
-from bot.models.models import TransactionType, CreditTransaction, User, RechargeStatus, UserStatus, Plan, PlanType, RequiredChannel
+from bot.services.blacklist_service import BlacklistService
+from bot.models.models import TransactionType, CreditTransaction, User, RechargeStatus, UserStatus, Plan, PlanType, RequiredChannel, Blacklist
 from bot.config import config
 from bot.keyboards.inline import (
     get_recharge_approval_keyboard,
@@ -18,6 +19,8 @@ from bot.keyboards.inline import (
     get_plan_delete_confirm_keyboard,
     get_admin_channels_keyboard,
     get_channels_delete_keyboard,
+    get_admin_blacklist_keyboard,
+    get_blacklist_items_keyboard,
 )
 import datetime
 
@@ -26,6 +29,11 @@ class AdminStates(StatesGroup):
 
 class ChannelAdminStates(StatesGroup):
     waiting_for_channel_input = State()
+
+class BlacklistAdminStates(StatesGroup):
+    waiting_for_phone = State()
+    waiting_for_email = State()
+    waiting_for_username = State()
 
 class PlanAdminStates(StatesGroup):
     create_value = State()
@@ -1269,5 +1277,256 @@ async def cb_delete_channel(callback: CallbackQuery, session: AsyncSession):
 
     text = f"✅ Channel <b>{title}</b> removed from requirements.\n\n" + await _build_channels_dashboard_text(session)
     await callback.message.edit_text(text, reply_markup=get_admin_channels_keyboard(), parse_mode="HTML")
+
+
+# ─── ADMIN BLOCKLIST HANDLERS ────────────────────────────────────────────────
+
+async def _build_blacklist_dashboard_text(session: AsyncSession) -> str:
+    bl_service = BlacklistService(session)
+    counts = await bl_service.get_counts()
+    return (
+        "🛡️ <b>ADMIN SEARCH BLOCKLIST SYSTEM</b>\n"
+        "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        "Select an entity category below to restrict searches:\n\n"
+        f"• <b>📱 Phone Numbers:</b> <code>{counts['phone']}</code> restricted\n"
+        f"• <b>📧 Email Addresses:</b> <code>{counts['email']}</code> restricted\n"
+        f"• <b>👤 Usernames:</b> <code>{counts['username']}</code> restricted\n"
+        f"• <b>🔒 Total Blocked:</b> <code>{counts['total']}</code> entities\n"
+        "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        "<i>When any user searches for a blocklisted target, the search is instantly intercepted with a restriction notice. No credits will be consumed.</i>"
+    )
+
+@router.message(Command("blocklist"))
+@router.message(Command("blacklist"))
+@router.message(F.text == "🚫 Blocklist")
+async def cmd_blocklist(event: Message | CallbackQuery, session: AsyncSession, state: FSMContext):
+    user_id = event.from_user.id
+    if not is_admin(user_id):
+        if isinstance(event, CallbackQuery):
+            await event.answer("Unauthorized.", show_alert=True)
+        return
+
+    await state.clear()
+    text = await _build_blacklist_dashboard_text(session)
+    kb = get_admin_blacklist_keyboard()
+    if isinstance(event, CallbackQuery):
+        await event.message.edit_text(text, reply_markup=kb, parse_mode="HTML")
+        await event.answer()
+    else:
+        await event.answer(text, reply_markup=kb, parse_mode="HTML")
+
+@router.callback_query(F.data == "bl_menu")
+async def cb_bl_menu(callback: CallbackQuery, session: AsyncSession, state: FSMContext):
+    if not is_admin(callback.from_user.id):
+        return await callback.answer("Unauthorized.", show_alert=True)
+    await state.clear()
+    text = await _build_blacklist_dashboard_text(session)
+    await callback.message.edit_text(text, reply_markup=get_admin_blacklist_keyboard(), parse_mode="HTML")
+    await callback.answer()
+
+@router.callback_query(F.data == "bl_type_phone")
+async def cb_bl_add_phone(callback: CallbackQuery, state: FSMContext):
+    if not is_admin(callback.from_user.id):
+        return await callback.answer("Unauthorized.", show_alert=True)
+    await state.set_state(BlacklistAdminStates.waiting_for_phone)
+    text = (
+        "📱 <b>Add Phone Number to Blocklist</b>\n"
+        "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        "Please send the phone number to block from reconnaissance:\n\n"
+        "👉 <i>Example: <code>9876543210</code> or <code>+91 9876543210</code></i>\n\n"
+        "<i>Send /cancel to abort.</i>"
+    )
+    await callback.message.edit_text(text, parse_mode="HTML")
+    await callback.answer()
+
+@router.callback_query(F.data == "bl_type_email")
+async def cb_bl_add_email(callback: CallbackQuery, state: FSMContext):
+    if not is_admin(callback.from_user.id):
+        return await callback.answer("Unauthorized.", show_alert=True)
+    await state.set_state(BlacklistAdminStates.waiting_for_email)
+    text = (
+        "📧 <b>Add Email Address to Blocklist</b>\n"
+        "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        "Please send the email address to block from reconnaissance:\n\n"
+        "👉 <i>Example: <code>target@example.com</code></i>\n\n"
+        "<i>Send /cancel to abort.</i>"
+    )
+    await callback.message.edit_text(text, parse_mode="HTML")
+    await callback.answer()
+
+@router.callback_query(F.data == "bl_type_username")
+async def cb_bl_add_username(callback: CallbackQuery, state: FSMContext):
+    if not is_admin(callback.from_user.id):
+        return await callback.answer("Unauthorized.", show_alert=True)
+    await state.set_state(BlacklistAdminStates.waiting_for_username)
+    text = (
+        "👤 <b>Add Username to Blocklist</b>\n"
+        "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        "Please send the username to block from reconnaissance:\n\n"
+        "👉 <i>Example: <code>username</code> (with or without @)</i>\n\n"
+        "<i>Send /cancel to abort.</i>"
+    )
+    await callback.message.edit_text(text, parse_mode="HTML")
+    await callback.answer()
+
+@router.message(BlacklistAdminStates.waiting_for_phone)
+async def process_bl_phone(message: Message, session: AsyncSession, state: FSMContext):
+    if not is_admin(message.from_user.id):
+        return
+    text = message.text.strip()
+    if text.startswith("/cancel"):
+        await state.clear()
+        dash_text = await _build_blacklist_dashboard_text(session)
+        return await message.answer("❌ Action cancelled.\n\n" + dash_text, reply_markup=get_admin_blacklist_keyboard(), parse_mode="HTML")
+
+    digits = "".join(filter(str.isdigit, text))
+    if len(digits) < 7 or len(digits) > 15:
+        return await message.answer("⚠️ Please send a valid phone number (at least 7 digits, e.g. <code>9876543210</code>).\nSend /cancel to abort.", parse_mode="HTML")
+
+    bl_service = BlacklistService(session)
+    success, msg, record = await bl_service.add_to_blacklist(
+        target_type="phone",
+        value=digits,
+        created_by=message.from_user.id
+    )
+    await state.clear()
+    dash_text = await _build_blacklist_dashboard_text(session)
+    if success:
+        await message.answer(
+            f"✅ <b>Phone Number Blocklisted!</b>\n"
+            f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+            f"📱 <b>Protected Value:</b> <code>{record.value}</code>\n"
+            f"🛡️ <i>Any future search for this number will be immediately intercepted.</i>\n\n"
+            + dash_text,
+            reply_markup=get_admin_blacklist_keyboard(),
+            parse_mode="HTML"
+        )
+    else:
+        await message.answer(f"⚠️ {msg}\n\n" + dash_text, reply_markup=get_admin_blacklist_keyboard(), parse_mode="HTML")
+
+@router.message(BlacklistAdminStates.waiting_for_email)
+async def process_bl_email(message: Message, session: AsyncSession, state: FSMContext):
+    if not is_admin(message.from_user.id):
+        return
+    text = message.text.strip()
+    if text.startswith("/cancel"):
+        await state.clear()
+        dash_text = await _build_blacklist_dashboard_text(session)
+        return await message.answer("❌ Action cancelled.\n\n" + dash_text, reply_markup=get_admin_blacklist_keyboard(), parse_mode="HTML")
+
+    if "@" not in text or "." not in text or " " in text:
+        return await message.answer("⚠️ Please send a valid email address (e.g. <code>target@example.com</code>).\nSend /cancel to abort.", parse_mode="HTML")
+
+    bl_service = BlacklistService(session)
+    success, msg, record = await bl_service.add_to_blacklist(
+        target_type="email",
+        value=text,
+        created_by=message.from_user.id
+    )
+    await state.clear()
+    dash_text = await _build_blacklist_dashboard_text(session)
+    if success:
+        await message.answer(
+            f"✅ <b>Email Address Blocklisted!</b>\n"
+            f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+            f"📧 <b>Protected Value:</b> <code>{record.value}</code>\n"
+            f"🛡️ <i>Any future search for this email will be immediately intercepted.</i>\n\n"
+            + dash_text,
+            reply_markup=get_admin_blacklist_keyboard(),
+            parse_mode="HTML"
+        )
+    else:
+        await message.answer(f"⚠️ {msg}\n\n" + dash_text, reply_markup=get_admin_blacklist_keyboard(), parse_mode="HTML")
+
+@router.message(BlacklistAdminStates.waiting_for_username)
+async def process_bl_username(message: Message, session: AsyncSession, state: FSMContext):
+    if not is_admin(message.from_user.id):
+        return
+    text = message.text.strip()
+    if text.startswith("/cancel"):
+        await state.clear()
+        dash_text = await _build_blacklist_dashboard_text(session)
+        return await message.answer("❌ Action cancelled.\n\n" + dash_text, reply_markup=get_admin_blacklist_keyboard(), parse_mode="HTML")
+
+    clean_uname = text.lstrip("@").strip()
+    if " " in clean_uname or not clean_uname:
+        return await message.answer("⚠️ Please send a valid username without spaces (e.g. <code>target_user</code>).\nSend /cancel to abort.", parse_mode="HTML")
+
+    bl_service = BlacklistService(session)
+    success, msg, record = await bl_service.add_to_blacklist(
+        target_type="username",
+        value=clean_uname,
+        created_by=message.from_user.id
+    )
+    await state.clear()
+    dash_text = await _build_blacklist_dashboard_text(session)
+    if success:
+        await message.answer(
+            f"✅ <b>Username Blocklisted!</b>\n"
+            f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+            f"👤 <b>Protected Value:</b> <code>{record.value}</code>\n"
+            f"🛡️ <i>Any future search for this username will be immediately intercepted.</i>\n\n"
+            + dash_text,
+            reply_markup=get_admin_blacklist_keyboard(),
+            parse_mode="HTML"
+        )
+    else:
+        await message.answer(f"⚠️ {msg}\n\n" + dash_text, reply_markup=get_admin_blacklist_keyboard(), parse_mode="HTML")
+
+@router.callback_query(F.data == "bl_view_list")
+async def cb_bl_view_list(callback: CallbackQuery, session: AsyncSession):
+    if not is_admin(callback.from_user.id):
+        return await callback.answer("Unauthorized.", show_alert=True)
+
+    bl_service = BlacklistService(session)
+    items = await bl_service.get_all()
+    if not items:
+        await callback.answer("The blocklist is currently empty!", show_alert=True)
+        return
+
+    text = (
+        "📋 <b>ACTIVE SEARCH BLOCKLIST</b>\n"
+        "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"Total restricted records: <b>{len(items)}</b>\n\n"
+        "Tap any entry below to <b>remove / unblock</b> it immediately:"
+    )
+    await callback.message.edit_text(text, reply_markup=get_blacklist_items_keyboard(items), parse_mode="HTML")
+    await callback.answer()
+
+@router.callback_query(F.data.startswith("bl_del_"))
+async def cb_bl_delete_item(callback: CallbackQuery, session: AsyncSession):
+    if not is_admin(callback.from_user.id):
+        return await callback.answer("Unauthorized.", show_alert=True)
+
+    blacklist_id = int(callback.data.split("_")[2])
+    bl_service = BlacklistService(session)
+    item = await bl_service.get_by_id(blacklist_id)
+    val_name = item.value if item else f"#{blacklist_id}"
+
+    deleted = await bl_service.remove_from_blacklist(blacklist_id)
+    if deleted:
+        await callback.answer(f"Removed {val_name} from blocklist!", show_alert=False)
+    else:
+        await callback.answer("Item was already removed.", show_alert=False)
+
+    remaining = await bl_service.get_all()
+    if remaining:
+        text = (
+            "📋 <b>ACTIVE SEARCH BLOCKLIST</b>\n"
+            "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+            f"Total restricted records: <b>{len(remaining)}</b>\n\n"
+            "Tap any entry below to <b>remove / unblock</b> it immediately:"
+        )
+        await callback.message.edit_text(text, reply_markup=get_blacklist_items_keyboard(remaining), parse_mode="HTML")
+    else:
+        dash_text = "✅ <b>Blocklist is now completely empty.</b>\n\n" + await _build_blacklist_dashboard_text(session)
+        await callback.message.edit_text(dash_text, reply_markup=get_admin_blacklist_keyboard(), parse_mode="HTML")
+
+@router.callback_query(F.data == "bl_close")
+async def cb_bl_close(callback: CallbackQuery):
+    if not is_admin(callback.from_user.id):
+        return await callback.answer("Unauthorized.", show_alert=True)
+    await callback.message.delete()
+
 
 

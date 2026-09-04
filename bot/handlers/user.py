@@ -6,6 +6,7 @@ from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.context import FSMContext
 from bot.services.user_service import UserService
 from bot.services.search_service import SearchService
+from bot.services.blacklist_service import BlacklistService
 from bot.models.models import User, UserStatus
 from bot.keyboards.inline import get_approval_keyboard, get_recharge_request_keyboard, get_recharge_amounts_keyboard, get_search_type_keyboard
 from bot.keyboards.reply import get_main_keyboard
@@ -496,8 +497,8 @@ async def process_search_input(message: Message, session: AsyncSession, state: F
     
     NAV_BUTTONS = [
         "📱 Number Info", "🪪 Aadhar Info", "📧 Email Info", "👤 Username Info",
-        "📊 My Status", "📖 How to use", "💳 Request Recharge",
-        "⚙️ Manage Users", "💰 Manage Points", "📦 Manage Plans", "📢 Channels", "🔍 Telegram Info"
+        "📊 My Status", "👥 Refer & Earn", "📖 How to use", "💳 Request Recharge",
+        "⚙️ Manage Users", "💰 Manage Points", "📦 Manage Plans", "📢 Channels", "🚫 Blocklist", "🔍 Telegram Info"
     ]
     if query in NAV_BUTTONS:
         await state.clear()
@@ -524,6 +525,27 @@ async def process_search_input(message: Message, session: AsyncSession, state: F
             return await message.answer("⚠️ Please write the Aadhar number correctly without spaces, like this: 123456789012")
             
     await state.clear()
+
+    # ── Blocklist Search Interception ──
+    bl_service = BlacklistService(session)
+    if await bl_service.is_blacklisted(search_type, query):
+        type_labels = {
+            "phone": "Phone number",
+            "email": "Email address",
+            "username": "Username",
+            "aadhar": "Aadhaar number",
+        }
+        label = type_labels.get(search_type, "Entity")
+        return await message.answer(
+            f"⛔ <b>SEARCH RESTRICTED</b>\n"
+            f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+            f"⚠️ <b>Restricted Target:</b>\n"
+            f"This {label.lower()} (<code>{query}</code>) is <b>blacklisted</b> from searches by system administration.\n\n"
+            f"🔒 <i>Due to administrative privacy policy, intelligence records for this entity are permanently restricted.</i>\n"
+            f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+            f"ℹ️ <i><b>Notice:</b> No search credits have been deducted from your account.</i>",
+            parse_mode="HTML"
+        )
     
     user_service = UserService(session)
     user = await user_service.get_user_by_telegram_id(message.from_user.id)

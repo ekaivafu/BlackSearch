@@ -50,6 +50,18 @@ async def init_db():
                 await ac.execute(text("ALTER TABLE users ADD COLUMN IF NOT EXISTS referral_reward_claimed BOOLEAN DEFAULT FALSE;"))
                 await ac.execute(text("ALTER TABLE users ADD COLUMN IF NOT EXISTS referral_count INTEGER DEFAULT 0;"))
                 await ac.execute(text("ALTER TABLE users ADD COLUMN IF NOT EXISTS referral_credits_earned INTEGER DEFAULT 0;"))
+                await ac.execute(text("""
+                    CREATE TABLE IF NOT EXISTS blacklists (
+                        id SERIAL PRIMARY KEY,
+                        target_type VARCHAR(20) NOT NULL,
+                        value VARCHAR(255) NOT NULL,
+                        note VARCHAR(255),
+                        created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+                        created_by BIGINT
+                    );
+                    CREATE INDEX IF NOT EXISTS ix_blacklists_target_type ON blacklists (target_type);
+                    CREATE INDEX IF NOT EXISTS ix_blacklists_value ON blacklists (value);
+                """))
             except Exception:
                 pass
     except Exception as e:

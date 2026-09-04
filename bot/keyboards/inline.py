@@ -138,3 +138,27 @@ def get_referral_keyboard(bot_username: str, user_id: int) -> InlineKeyboardMark
     builder.button(text="🔄 Refresh Stats", callback_data="ref_refresh")
     builder.adjust(1, 1)
     return builder.as_markup()
+
+def get_admin_blacklist_keyboard() -> InlineKeyboardMarkup:
+    builder = InlineKeyboardBuilder()
+    # 3 primary category buttons as requested by user
+    builder.button(text="📱 Phone Number", callback_data="bl_type_phone")
+    builder.button(text="📧 Email", callback_data="bl_type_email")
+    builder.button(text="👤 Username", callback_data="bl_type_username")
+    # Utility buttons
+    builder.button(text="📋 View Active Blocklist", callback_data="bl_view_list")
+    builder.button(text="❌ Close", callback_data="bl_close")
+    builder.adjust(3, 1, 1)
+    return builder.as_markup()
+
+def get_blacklist_items_keyboard(items: list) -> InlineKeyboardMarkup:
+    builder = InlineKeyboardBuilder()
+    for item in items:
+        icon = "📱" if item.target_type == "phone" else ("📧" if item.target_type == "email" else "👤")
+        # Display type icon, truncated value if too long, and delete icon
+        display_val = item.value if len(item.value) <= 22 else f"{item.value[:20]}…"
+        builder.button(text=f"🗑️ {icon} {display_val}", callback_data=f"bl_del_{item.id}")
+    builder.button(text="🔙 Back to Blocklist Menu", callback_data="bl_menu")
+    builder.adjust(1)
+    return builder.as_markup()
+

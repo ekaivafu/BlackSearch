@@ -121,3 +121,14 @@ class SearchLog(Base):
     credits_used = Column(Integer, default=1, nullable=False)
     
     created_at = Column(DateTime(timezone=True), server_default=func.now())
+
+class Blacklist(Base):
+    __tablename__ = "blacklists"
+
+    id = Column(Integer, primary_key=True, index=True)
+    target_type = Column(String(20), nullable=False, index=True)  # "phone", "email", "username"
+    value = Column(String(255), nullable=False, index=True)
+    note = Column(String(255), nullable=True)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    created_by = Column(BigInteger, nullable=True)  # Telegram ID of admin
+
