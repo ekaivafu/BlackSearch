@@ -581,25 +581,30 @@ async def process_search_input(message: Message, session: AsyncSession, state: F
         "💳 Request Recharge": lambda: cmd_recharge(message, session, bot),
     }
 
-    if is_admin:
-        from bot.handlers.admin import (
-            btn_manage_users,
-            btn_manage_points,
-            btn_manage_plans,
-            btn_manage_channels,
-            btn_manage_blacklist
-        )
-        NAV_ACTIONS.update({
-            "⚙️ Manage Users": lambda: btn_manage_users(message, session),
-            "💰 Manage Points": lambda: btn_manage_points(message, session),
-            "📦 Manage Plans": lambda: btn_manage_plans(message, session),
-            "📢 Channels": lambda: btn_manage_channels(message, session),
-            "🚫 Blocklist": lambda: btn_manage_blacklist(message, session),
-        })
+    ADMIN_NAV_BUTTONS = [
+        "⚙️ Manage Users", "💰 Manage Points", "📦 Manage Plans", "📢 Channels", "🚫 Blocklist"
+    ]
 
     if query in NAV_ACTIONS:
         await state.clear()
         return await NAV_ACTIONS[query]()
+    elif is_admin and query in ADMIN_NAV_BUTTONS:
+        await state.clear()
+        from bot.handlers.admin import (
+            btn_manage_users,
+            btn_manage_points,
+            cmd_manage_plans,
+            cmd_manage_channels,
+            cmd_blocklist
+        )
+        admin_actions = {
+            "⚙️ Manage Users": lambda: btn_manage_users(message, session),
+            "💰 Manage Points": lambda: btn_manage_points(message, session),
+            "📦 Manage Plans": lambda: cmd_manage_plans(message, session, state),
+            "📢 Channels": lambda: cmd_manage_channels(message, session, state),
+            "🚫 Blocklist": lambda: cmd_blocklist(message, session, state),
+        }
+        return await admin_actions[query]()
 
     current_state = await state.get_state()
 
