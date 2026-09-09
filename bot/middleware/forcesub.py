@@ -35,6 +35,10 @@ class ForceSubMiddleware(BaseMiddleware):
             # Allow private chats only or handle group gracefully
             if event.chat.type != "private":
                 return await handler(event, data)
+            # Always allow /start through so referral parameters (e.g. /start ref_12345)
+            # are registered in cmd_start before the forcesub screen is displayed.
+            if event.text and event.text.startswith("/start"):
+                return await handler(event, data)
         elif isinstance(event, CallbackQuery):
             user = event.from_user
             # Always allow the verification button handler through

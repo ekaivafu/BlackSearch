@@ -70,6 +70,17 @@ def _get_conn():
                     print(f"Could not set HF secret in MD: {e}")
                     
             _global_conn = con
+            
+            # 🚀 Turbo Settings for Remote Parquet over HTTP
+            try:
+                con.execute("SET parquet_metadata_cache = true;")
+                con.execute("SET enable_http_metadata_cache = true;")
+                con.execute("SET prefetch_all_parquet_files = true;")
+                con.execute("SET preserve_insertion_order = false;")
+                print("⚡ DuckDB / MotherDuck HTTP & Parquet turbo flags active!")
+            except Exception as pe:
+                print(f"Notice on DuckDB pragma flags: {pe}")
+
             print("✅ MotherDuck successfully connected!")
         except Exception as e:
             print(f"❌ FATAL ERROR: MotherDuck connection failed: {e}.")
@@ -192,9 +203,10 @@ def _run_inddata_search(field: str, value: str, limit: int = 10) -> list[dict]:
     con = _get_conn()
     cursor = con.cursor()
     
-    # 🚀 Since we are now using MotherDuck, we don't need to batch the queries!
-    # MotherDuck's 64GB+ cloud servers can easily handle searching all 120 files at the exact same time without freezing!
-    sql = f"SELECT * FROM read_parquet('{INDDATA_INDEX}') WHERE {query_field} = '{v}' LIMIT {limit}"
+    # 🚀 Column projection optimization: only fetch required fields instead of SELECT *
+    # to dramatically reduce Parquet HTTP decompressed bandwidth across all 120 chunks
+    cols_needed = "name, fname, mobile, alt, address, circle, email"
+    sql = f"SELECT {cols_needed} FROM read_parquet('{INDDATA_INDEX}') WHERE {query_field} = '{v}' LIMIT {limit}"
     
     try:
         rows = cursor.execute(sql).fetchall()
@@ -218,51 +230,135 @@ def _run_inddata_search(field: str, value: str, limit: int = 10) -> list[dict]:
         print(f"Inddata search error: {e}")
         return []
 
+# ── High-Speed In-Memory Search Cache (TTL: 2 Hours) ────────────────────────
+import time
+
+_search_cache: dict = {}
+_cache_lock = threading.Lock()
+CACHE_TTL = 7200  # 2 hours
+MAX_CACHE_SIZE = 1000
+
+def _get_cached_result(cache_key: str) -> dict | None:
+    with _cache_lock:
+        if cache_key in _search_cache:
+            ts, res = _search_cache[cache_key]
+            if time.time() - ts < CACHE_TTL:
+                return {
+                    "field": res.get("field"),
+                    "value": res.get("value"),
+                    "mode": res.get("mode"),
+                    "count": res.get("count", 0),
+                    "results": [dict(r) for r in res.get("results", [])]
+                }
+            else:
+                del _search_cache[cache_key]
+    return None
+
+def _set_cached_result(cache_key: str, res: dict):
+    with _cache_lock:
+        now = time.time()
+        if len(_search_cache) > MAX_CACHE_SIZE:
+            expired = [k for k, (ts, _) in _search_cache.items() if now - ts > CACHE_TTL]
+            for k in expired:
+                del _search_cache[k]
+            if len(_search_cache) > MAX_CACHE_SIZE:
+                sorted_keys = sorted(_search_cache.keys(), key=lambda k: _search_cache[k][0])
+                for k in sorted_keys[:100]:
+                    del _search_cache[k]
+        _search_cache[cache_key] = (
+            now,
+            {
+                "field": res.get("field"),
+                "value": res.get("value"),
+                "mode": res.get("mode"),
+                "count": res.get("count", 0),
+                "results": [dict(r) for r in res.get("results", [])]
+            }
+        )
+
 def run_sync_search(search_type: str, query: str, limit: int = 10) -> dict:
     q = query.strip()
+    cache_key = f"{search_type}:{q.lower()}:{limit}"
+    cached = _get_cached_result(cache_key)
+    if cached is not None:
+        return cached
+
     if search_type == "phone":
-        main_data = _run_field_search("phoneNumber", q, "exact", limit)
-        tc_res = _run_truecaller_search("phoneNumber", q, limit)
-        
-        # Calculate remaining limit
-        rem_limit = limit - len(main_data["results"])
-        ind_res = []
-        if rem_limit > 0:
-            ind_res = _run_inddata_search("phoneNumber", q, rem_limit)
-        
+        # 🚀 Execute ICMR, Truecaller, and Inddata in PARALLEL simultaneously
+        fut_main = pool.submit(_run_field_search, "phoneNumber", q, "exact", limit)
+        fut_tc   = pool.submit(_run_truecaller_search, "phoneNumber", q, limit)
+        fut_ind  = pool.submit(_run_inddata_search, "phoneNumber", q, limit)
+
+        try:
+            main_data = fut_main.result()
+        except Exception as e:
+            print(f"Main field search error: {e}")
+            main_data = {"count": 0, "results": []}
+
+        try:
+            tc_res = fut_tc.result()
+        except Exception as e:
+            print(f"Truecaller search error: {e}")
+            tc_res = []
+
+        try:
+            ind_res = fut_ind.result()
+        except Exception as e:
+            print(f"Inddata search error: {e}")
+            ind_res = []
+
         # Enrich main_data with Truecaller info if available
-        if tc_res and main_data["results"]:
+        if tc_res and main_data.get("results"):
             tc_row = tc_res[0]
             for r in main_data["results"]:
                 r["Email"] = tc_row.get("Email")
                 r["Carrier"] = tc_row.get("Carrier")
                 r["Gender"] = tc_row.get("Gender")
                 r["Truecaller_Name"] = tc_row.get("Name")
-        elif not main_data["results"] and tc_res:
+        elif not main_data.get("results") and tc_res:
             main_data["results"] = tc_res
-        
-        # Append Inddata results
+
+        # Append Inddata results (up to limit)
         if ind_res:
-            main_data["results"].extend(ind_res)
-            
-        # Update total count
-        main_data["count"] = len(main_data["results"])
-            
+            cur_len = len(main_data.get("results", []))
+            rem = max(0, limit - cur_len)
+            if rem > 0:
+                main_data["results"].extend(ind_res[:rem])
+
+        main_data["count"] = len(main_data.get("results", []))
+        _set_cached_result(cache_key, main_data)
         return main_data
-        
+
     elif search_type == "aadhar":
-        return _run_field_search("aadharNumber", q, "exact", limit)
-        
+        res = _run_field_search("aadharNumber", q, "exact", limit)
+        _set_cached_result(cache_key, res)
+        return res
+
     elif search_type == "email":
-        tc_res = _run_truecaller_search("email", q, limit)
+        # Run Truecaller and Inddata concurrently for email lookup
+        fut_tc  = pool.submit(_run_truecaller_search, "email", q, limit)
+        fut_ind = pool.submit(_run_inddata_search, "email", q, limit)
+
+        try:
+            tc_res = fut_tc.result()
+        except Exception as e:
+            print(f"Truecaller email search error: {e}")
+            tc_res = []
+
+        try:
+            ind_res = fut_ind.result()
+        except Exception as e:
+            print(f"Inddata email search error: {e}")
+            ind_res = []
+
         main_data = {"count": 0, "results": []}
-        
+
         if tc_res:
             phone = tc_res[0].get("Number")
             if phone:
                 main_data = _run_field_search("phoneNumber", phone, "exact", limit)
                 tc_row = tc_res[0]
-                if main_data["results"]:
+                if main_data.get("results"):
                     for r in main_data["results"]:
                         r["Email"] = tc_row.get("Email")
                         r["Carrier"] = tc_row.get("Carrier")
@@ -272,17 +368,15 @@ def run_sync_search(search_type: str, query: str, limit: int = 10) -> dict:
                     main_data["results"] = tc_res
             else:
                 main_data["results"] = tc_res
-                
-        # Append Inddata results for email
-        rem_limit = limit - len(main_data["results"])
-        if rem_limit > 0:
-            ind_res = _run_inddata_search("email", q, rem_limit)
-            if ind_res:
-                main_data["results"].extend(ind_res[:rem_limit])
-            
-        main_data["count"] = len(main_data["results"])
+
+        rem_limit = limit - len(main_data.get("results", []))
+        if rem_limit > 0 and ind_res:
+            main_data["results"].extend(ind_res[:rem_limit])
+
+        main_data["count"] = len(main_data.get("results", []))
+        _set_cached_result(cache_key, main_data)
         return main_data
-        
+
     return {"count": 0, "results": []}
 
 FIELD_EMOJIS = {
@@ -329,6 +423,7 @@ import html
 def format_result(row: dict) -> str:
     """Format a single result record as readable text for Telegram."""
     lines = []
+    seen_labels = set()
     
     fields_to_use = SEARCH_FIELDS + ["Email", "Carrier", "Gender", "Truecaller_Name", "Name", "Number"]
     
@@ -337,9 +432,16 @@ def format_result(row: dict) -> str:
             continue  # Never expose internal database or dataset names to users
         val = row.get(field, "")
         if val:
+            safe_val = html.escape(str(val).strip())
+            if not safe_val:
+                continue
             emoji = FIELD_EMOJIS.get(field, "🔹")
             label = FIELD_LABELS.get(field, field.capitalize())
-            safe_val = html.escape(str(val).strip())
+            # Avoid duplicate rows with same label (e.g. name vs Name, phoneNumber vs Number)
+            norm_label = label.strip().lower()
+            if norm_label in seen_labels:
+                continue
+            seen_labels.add(norm_label)
             lines.append(f"{emoji} <b>{label}:</b> {safe_val}")
     
     cn = row.get("connected_numbers", [])

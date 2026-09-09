@@ -1,3 +1,4 @@
+import html
 from aiogram import Router, F, Bot
 from aiogram.filters import CommandStart, Command
 from aiogram.types import Message, CallbackQuery
@@ -7,12 +8,15 @@ from aiogram.fsm.context import FSMContext
 from bot.services.user_service import UserService
 from bot.services.search_service import SearchService
 from bot.services.blacklist_service import BlacklistService
-from bot.models.models import User, UserStatus
+from bot.models.models import User, UserStatus, RechargeRequest
 from bot.keyboards.inline import get_approval_keyboard, get_recharge_request_keyboard, get_recharge_amounts_keyboard, get_search_type_keyboard
 from bot.keyboards.reply import get_main_keyboard
 from bot.config import config
 from bot.middleware.daily_bonus import DAILY_BONUS_BANNER
 import asyncio
+import logging
+
+logger = logging.getLogger(__name__)
 
 class SearchStates(StatesGroup):
     waiting_for_phone = State()
@@ -38,7 +42,7 @@ def build_welcome_text(user: User, is_admin: bool) -> str:
         days = diff.days
         hours = diff.seconds // 3600
         quota_display = f"♾️ Unlimited ({days}d {hours}h left)"
-        tier_display = "👑 VIP Unlimited Pass"
+        tier_display = "💎 VIP Unlimited Pass"
     elif effective_credits > 0:
         parts = []
         if user.bonus_credits > 0:
@@ -51,7 +55,8 @@ def build_welcome_text(user: User, is_admin: bool) -> str:
         quota_display = "⚠️ 0 credits (Exhausted)"
         tier_display = "⏳ Daily Bonus Expired"
 
-    name = f"{user.first_name or ''} {user.last_name or ''}".strip() or "Operator"
+    raw_name = f"{user.first_name or ''} {user.last_name or ''}".strip() or "Operator"
+    name = html.escape(raw_name)
 
     return (
         "⚡ <b>BLACKSEARCH OSINT INTELLIGENCE</b> ⚡\n"
@@ -269,8 +274,9 @@ async def cmd_status(message: Message, session: AsyncSession):
         credits_display = "⚠️ 0 credits (Exhausted)"
         plan_badge = "⏳ Daily Bonus Expired"
 
-    name = f"{user.first_name or ''} {user.last_name or ''}".strip() or "Operator"
-    username_part = f"(@{user.username})" if user.username else ""
+    raw_name = f"{user.first_name or ''} {user.last_name or ''}".strip() or "Operator"
+    name = html.escape(raw_name)
+    username_part = f"(@{html.escape(user.username)})" if user.username else ""
     created_date = user.created_at.strftime('%d %b %Y, %H:%M UTC') if user.created_at else "Unknown"
 
     status_text = (
@@ -488,42 +494,169 @@ async def btn_status(message: Message, session: AsyncSession):
 async def btn_recharge(message: Message, session: AsyncSession, bot: Bot):
     await cmd_recharge(message, session, bot)
 
+def _chunk_text(text: str, max_size: int = 3800) -> list[str]:
+    """Splits text into chunks no larger than max_size, breaking at newlines if possible."""
+    chunks = []
+    while len(text) > max_size:
+        split_at = text.rfind("\n", 0, max_size)
+        if split_at == -1 or split_at < max_size // 3:
+            split_at = max_size
+        chunks.append(text[:split_at])
+        text = text[split_at:].lstrip("\r\n")
+    if text:
+        chunks.append(text)
+    return chunks
+
+async def send_long_search_result(
+    message: Message,
+    header: str,
+    body: str,
+    footer: str
+):
+    """Sends search results to the user, safely splitting across multiple messages if exceeding Telegram 4096-char limit."""
+    full_text = f"{header}{body}{footer}"
+    if len(full_text) <= 4000:
+        try:
+            return await message.answer(full_text, parse_mode="HTML", disable_web_page_preview=True)
+        except Exception:
+            return await message.answer(full_text, disable_web_page_preview=True)
+
+    # Split by record blocks if present
+    if "<b>--- Record " in body:
+        parts = body.split("<b>--- Record ")
+        chunks = []
+        cur = header + parts[0]
+        for p in parts[1:]:
+            rec = "<b>--- Record " + p
+            if len(cur) + len(rec) < 3700:
+                cur += rec
+            else:
+                chunks.append(cur)
+                cur = rec
+        chunks.append(cur + footer)
+    else:
+        # Split by lines
+        lines = body.splitlines(keepends=True)
+        chunks = []
+        cur = header
+        for line in lines:
+            if len(cur) + len(line) < 3700:
+                cur += line
+            else:
+                chunks.append(cur)
+                cur = line
+        chunks.append(cur + footer)
+
+    for idx, c in enumerate(chunks):
+        if not c.strip():
+            continue
+        sub_chunks = _chunk_text(c, 3800)
+        for sc in sub_chunks:
+            try:
+                await message.answer(sc, parse_mode="HTML", disable_web_page_preview=True)
+            except Exception:
+                await message.answer(sc, disable_web_page_preview=True)
+            await asyncio.sleep(0.08)
+
 @router.message(SearchStates.waiting_for_phone)
 @router.message(SearchStates.waiting_for_aadhar)
 @router.message(SearchStates.waiting_for_email)
 @router.message(SearchStates.waiting_for_username)
-async def process_search_input(message: Message, session: AsyncSession, state: FSMContext):
+async def process_search_input(message: Message, session: AsyncSession, state: FSMContext, bot: Bot):
+    if not message.text:
+        return await message.answer("⚠️ Please send text input.")
+
     query = message.text.strip()
-    
-    NAV_BUTTONS = [
-        "📱 Number Info", "🪪 Aadhar Info", "📧 Email Info", "👤 Username Info",
-        "📊 My Status", "👥 Refer & Earn", "📖 How to use", "💳 Request Recharge",
-        "⚙️ Manage Users", "💰 Manage Points", "📦 Manage Plans", "📢 Channels", "🚫 Blocklist", "🔍 Telegram Info"
-    ]
-    if query in NAV_BUTTONS:
+    is_admin = message.from_user.id in config.admin_ids
+
+    # Navigation buttons: immediately execute the clicked action instead of requiring double-tap
+    NAV_ACTIONS = {
+        "📱 Number Info": lambda: btn_search_phone(message, session, state),
+        "🪪 Aadhar Info": lambda: btn_aadhar_search(message, session, state),
+        "📧 Email Info": lambda: btn_email_search(message, session, state),
+        "👤 Username Info": lambda: btn_username_search(message, session, state),
+        "📊 My Status": lambda: cmd_status(message, session),
+        "👥 Refer & Earn": lambda: cmd_referral(message, session, bot),
+        "📖 How to use": lambda: btn_how_to_use(message),
+        "💳 Request Recharge": lambda: cmd_recharge(message, session, bot),
+    }
+
+    if is_admin:
+        from bot.handlers.admin import (
+            btn_manage_users,
+            btn_manage_points,
+            btn_manage_plans,
+            btn_manage_channels,
+            btn_manage_blacklist
+        )
+        NAV_ACTIONS.update({
+            "⚙️ Manage Users": lambda: btn_manage_users(message, session),
+            "💰 Manage Points": lambda: btn_manage_points(message, session),
+            "📦 Manage Plans": lambda: btn_manage_plans(message, session),
+            "📢 Channels": lambda: btn_manage_channels(message, session),
+            "🚫 Blocklist": lambda: btn_manage_blacklist(message, session),
+        })
+
+    if query in NAV_ACTIONS:
         await state.clear()
-        is_admin = message.from_user.id in config.admin_ids
-        return await message.answer("Search cancelled. Please select the option again to proceed.", reply_markup=get_main_keyboard(is_admin))
-        
+        return await NAV_ACTIONS[query]()
+
     current_state = await state.get_state()
-    
+
     if current_state == SearchStates.waiting_for_phone.state:
         search_type = "phone"
-        if not query.isdigit():
-            return await message.answer("⚠️ Please write the number correctly without +91 or spaces, like this: 1234567890")
+        # Auto-normalize phone numbers: strip +91, country code 91 if 12 digits, spaces, hyphens
+        raw_digits = "".join(ch for ch in query if ch.isdigit())
+        if raw_digits.startswith("91") and len(raw_digits) == 12:
+            raw_digits = raw_digits[2:]
+        if len(raw_digits) == 10:
+            query = raw_digits
+        else:
+            return await message.answer(
+                "⚠️ <b>Invalid Phone Number</b>\n\n"
+                "Please enter a valid 10-digit Indian mobile number.\n"
+                "<i>Examples: <code>9876543210</code>, <code>+91 98765 43210</code></i>\n"
+                "<i>Send /cancel to abort.</i>",
+                parse_mode="HTML"
+            )
     elif current_state == SearchStates.waiting_for_email.state:
         search_type = "email"
-        if " " in query or "@" not in query:
-            return await message.answer("⚠️ Please write the email correctly without spaces, like this: example@gmail.com")
+        clean_email = query.strip().lower()
+        if " " in clean_email or "@" not in clean_email or "." not in clean_email.split("@")[-1]:
+            return await message.answer(
+                "⚠️ <b>Invalid Email Address</b>\n\n"
+                "Please enter a valid email address.\n"
+                "<i>Example: <code>target@gmail.com</code></i>\n"
+                "<i>Send /cancel to abort.</i>",
+                parse_mode="HTML"
+            )
+        query = clean_email
     elif current_state == SearchStates.waiting_for_username.state:
         search_type = "username"
-        if " " in query:
-            return await message.answer("⚠️ Please write the username correctly without spaces, like this: ekaivafu")
+        clean_uname = query.lstrip("@").strip()
+        if " " in clean_uname or not clean_uname:
+            return await message.answer(
+                "⚠️ <b>Invalid Username</b>\n\n"
+                "Please enter a valid username handle without spaces.\n"
+                "<i>Example: <code>cyberrecon</code> (without @)</i>\n"
+                "<i>Send /cancel to abort.</i>",
+                parse_mode="HTML"
+            )
+        query = clean_uname
     else:
         search_type = "aadhar"
-        if not query.isdigit():
-            return await message.answer("⚠️ Please write the Aadhar number correctly without spaces, like this: 123456789012")
-            
+        raw_digits = "".join(ch for ch in query if ch.isdigit())
+        if len(raw_digits) == 12:
+            query = raw_digits
+        else:
+            return await message.answer(
+                "⚠️ <b>Invalid Aadhaar Number</b>\n\n"
+                "Please enter a valid 12-digit Aadhaar number.\n"
+                "<i>Example: <code>123456789012</code></i>\n"
+                "<i>Send /cancel to abort.</i>",
+                parse_mode="HTML"
+            )
+
     await state.clear()
 
     # ── Blocklist Search Interception ──
@@ -536,44 +669,45 @@ async def process_search_input(message: Message, session: AsyncSession, state: F
             "aadhar": "Aadhaar number",
         }
         label = type_labels.get(search_type, "Entity")
+        safe_query = html.escape(query)
         return await message.answer(
             f"⛔ <b>SEARCH RESTRICTED</b>\n"
             f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
             f"⚠️ <b>Restricted Target:</b>\n"
-            f"This {label.lower()} (<code>{query}</code>) is <b>blacklisted</b> from searches by system administration.\n\n"
+            f"This {label.lower()} (<code>{safe_query}</code>) is <b>blacklisted</b> from searches by system administration.\n\n"
             f"🔒 <i>Due to administrative privacy policy, intelligence records for this entity are permanently restricted.</i>\n"
             f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
             f"ℹ️ <i><b>Notice:</b> No search credits have been deducted from your account.</i>",
             parse_mode="HTML"
         )
-    
+
     user_service = UserService(session)
     user = await user_service.get_user_by_telegram_id(message.from_user.id)
-    
+
     if not user or user.status != UserStatus.APPROVED:
         return await message.answer("You are not authorized to perform searches.")
-        
-    is_admin = message.from_user.id in config.admin_ids
-    
+
+    deducted_source = None
+    has_sub = False
     if not is_admin:
         import datetime
         now_utc = datetime.datetime.now(datetime.timezone.utc)
         has_sub = bool(user.subscription_end and user.subscription_end > now_utc)
         await user_service.check_and_apply_daily_bonus(user)
         effective_credits = UserService.get_effective_credits(user)
-        
+
         if effective_credits < 1 and not has_sub:
             return await message.answer(
                 "⚠️ Your search credits are exhausted. Please request a recharge or wait for tomorrow's daily bonus.",
                 reply_markup=get_recharge_request_keyboard()
             )
-            
+
         if not has_sub:
-            # Deduct credit
-            deducted = await user_service.deduct_credit(user.telegram_user_id, 1)
-            if not deducted:
+            # Deduct credit safely, tracking whether bonus or permanent credits were used
+            success, deducted_source = await user_service.deduct_credit(user.telegram_user_id, 1)
+            if not success:
                 return await message.answer("Failed to process credits. Please try again.")
-        
+
     global search_queue_count
     search_queue_count += 1
     try:
@@ -582,10 +716,10 @@ async def process_search_input(message: Message, session: AsyncSession, state: F
             wait_msg = await message.answer(f"⏳ <b>You are in a queue!</b>\nPeople ahead of you: {search_queue_count - 15}\n<i>I will notify you when your search is over.</i>", parse_mode="HTML")
         else:
             wait_msg = await message.answer("⏳ <b>Querying Global Database, please wait...</b>\n<code>[          ]</code>", parse_mode="HTML")
-        
+
         search_service = SearchService(session)
         search_task = asyncio.create_task(search_service.search(user, query=query, search_type=search_type))
-        
+
         frames = [
             "[=         ]",
             "[==        ]",
@@ -598,7 +732,7 @@ async def process_search_input(message: Message, session: AsyncSession, state: F
             "[========= ]",
             "[==========]"
         ]
-        
+
         if search_queue_count > 15:
             animation_texts = [
                 f"⏳ <b>You are in a queue!</b> ({search_queue_count - 15} ahead of you)\n<i>I will notify you when your search is over.</i>"
@@ -621,28 +755,28 @@ async def process_search_input(message: Message, session: AsyncSession, state: F
             animation_texts = [
                 "⏳ <b>Querying Global Database, please wait...</b>"
             ]
-        
+
         frame_idx = 0
-        
+
         # Animate loading bar while search is running
         while not search_task.done():
             for _ in range(25): # check every 0.1s for 2.5s total before updating frame
                 if search_task.done():
                     break
                 await asyncio.sleep(0.1)
-                
+
             if not search_task.done():
                 frame_idx = (frame_idx + 1) % len(frames)
                 text_idx = frame_idx % len(animation_texts)
                 msg_text = animation_texts[text_idx]
-                
+
                 try:
                     await wait_msg.edit_text(f"{msg_text}\n<code>{frames[frame_idx]}</code>", parse_mode="HTML")
                 except Exception:
                     pass
-                    
+
         result = search_task.result()
-        
+
         # Delete waiting message
         try:
             await wait_msg.delete()
@@ -650,7 +784,7 @@ async def process_search_input(message: Message, session: AsyncSession, state: F
             pass
     finally:
         search_queue_count -= 1
-    
+
     if result["success"]:
         import datetime
         now_utc = datetime.datetime.now(datetime.timezone.utc)
@@ -666,15 +800,14 @@ async def process_search_input(message: Message, session: AsyncSession, state: F
             if user.credits > 0:
                 parts.append(f"🪙 {user.credits} permanent")
             credits_display = " | ".join(parts) if parts else "0"
-            
-        await message.answer(
-            f"✅ <b>Search Successful!</b>\n\n{result['data']}\n\n💰 <b>Remaining credits:</b> <code>{credits_display}</code>",
-            parse_mode="HTML"
-        )
+
+        header = "✅ <b>Search Successful!</b>\n\n"
+        footer = f"\n\n💰 <b>Remaining credits:</b> <code>{credits_display}</code>"
+        await send_long_search_result(message, header, result['data'], footer)
     else:
-        # If search failed, auto-refund the deducted credit so user never loses credit!
-        if not is_admin and not has_sub:
-            await user_service.add_credit(user.telegram_user_id, 1)
+        # If search failed, auto-refund the deducted credit preserving bonus vs permanent source!
+        if not is_admin and not has_sub and deducted_source in ("bonus", "permanent"):
+            await user_service.refund_credit(user.telegram_user_id, 1, source=deducted_source)
             refund_note = "\n\n💰 <i>Your search credit has been automatically refunded.</i>"
         else:
             refund_note = ""
@@ -724,6 +857,75 @@ async def cb_request_recharge(callback: CallbackQuery, session: AsyncSession, bo
     await callback.answer()  # dismiss the button spinner
 
 
+async def notify_admins_purchase_request(
+    bot: Bot,
+    req: RechargeRequest,
+    user: User,
+    pkg_name: str,
+    is_updated: bool = False
+) -> int:
+    """Dispatches purchase request notification to all configured admins with robust fallback and logging."""
+    from bot.keyboards.inline import get_recharge_approval_keyboard
+    import html
+
+    full_name = f"{user.first_name or ''} {user.last_name or ''}".strip() or "User"
+    safe_name = html.escape(full_name)
+    username_str = f"@{user.username}" if user.username else "None"
+    safe_username = html.escape(username_str)
+    safe_pkg = html.escape(pkg_name)
+
+    title_prefix = "🔄 <b>Updated Purchase Request</b>" if is_updated else "💳 <b>New Purchase Request</b>"
+
+    html_text = (
+        f"{title_prefix} <b>#{req.id}</b>\n\n"
+        f"👤 <b>Name:</b> <a href='tg://user?id={user.telegram_user_id}'>{safe_name}</a>\n"
+        f"🔗 <b>Username:</b> {safe_username}\n"
+        f"🆔 <b>User ID:</b> <code>{user.telegram_user_id}</code>\n\n"
+        f"📦 <b>Package Selected:</b> <b>{safe_pkg}</b>"
+    )
+
+    plain_title = "🔄 Updated Purchase Request" if is_updated else "💳 New Purchase Request"
+    plain_text = (
+        f"{plain_title} #{req.id}\n\n"
+        f"👤 Name: {full_name}\n"
+        f"🔗 Username: {username_str}\n"
+        f"🆔 User ID: {user.telegram_user_id}\n\n"
+        f"📦 Package Selected: {pkg_name}"
+    )
+
+    notified_count = 0
+    reply_markup = get_recharge_approval_keyboard(req.id)
+
+    for admin_id in config.admin_ids:
+        # First attempt: HTML formatted message
+        try:
+            await bot.send_message(
+                chat_id=admin_id,
+                text=html_text,
+                reply_markup=reply_markup,
+                parse_mode="HTML"
+            )
+            logger.info(f"Dispatched purchase request #{req.id} to admin {admin_id} (HTML mode)")
+            notified_count += 1
+            continue
+        except Exception as e_html:
+            logger.warning(f"Failed to send purchase request #{req.id} in HTML mode to admin {admin_id}: {e_html}. Retrying in plain text...")
+
+        # Fallback attempt: Plain text
+        try:
+            await bot.send_message(
+                chat_id=admin_id,
+                text=plain_text,
+                reply_markup=reply_markup
+            )
+            logger.info(f"Dispatched purchase request #{req.id} to admin {admin_id} (Plain text mode)")
+            notified_count += 1
+        except Exception as e_plain:
+            logger.error(f"Failed to send purchase request #{req.id} to admin {admin_id} in plain text mode: {e_plain}")
+
+    return notified_count
+
+
 @router.callback_query(F.data.startswith("buy_plan_"))
 async def cb_buy_plan(callback: CallbackQuery, session: AsyncSession, bot: Bot):
     plan_id = int(callback.data.split("_")[2])
@@ -742,43 +944,29 @@ async def cb_buy_plan(callback: CallbackQuery, session: AsyncSession, bot: Bot):
     amount_val = plan.credits if plan.plan_type == PlanType.CREDITS else -plan.days
     req = await user_service.request_recharge(callback.from_user.id, amount_val, plan_id=plan.id)
     if not req:
-        return await callback.answer(
-            "You already have a pending purchase request. Please wait for the admin to process it.",
-            show_alert=True
-        )
-        
-    await callback.answer("✅ Request sent! Please contact @tgekaiva to pay.")
+        return await callback.answer("Failed to create purchase request. Please try again.", show_alert=True)
 
+    is_updated = getattr(req, "is_updated", False)
     pkg_name = f"{plan.name} (₹{plan.price})"
-    await callback.message.edit_text(
-        f"✅ <b>Purchase Request Sent!</b>\n\nYou selected: <b>{pkg_name}</b>\n\n"
-        "👉 <b>Please message @tgekaiva to complete your payment.</b>\n"
-        "Once payment is confirmed, your account will be upgraded instantly!",
-        parse_mode="HTML"
-    )
-    
-    name = f"{user.first_name} {user.last_name or ''}".strip()
-    username = f"@{user.username}" if user.username else "None"
-    
-    admin_text = (
-        f"💳 <b>New Purchase Request #{req.id}</b>\n\n"
-        f"👤 <b>Name:</b> <a href='tg://user?id={callback.from_user.id}'>{name}</a>\n"
-        f"🔗 <b>Username:</b> {username}\n"
-        f"🆔 <b>User ID:</b> <code>{callback.from_user.id}</code>\n\n"
-        f"📦 <b>Package Selected:</b> {pkg_name}"
-    )
-    
-    from bot.keyboards.inline import get_recharge_approval_keyboard
-    for admin_id in config.admin_ids:
-        try:
-            await bot.send_message(
-                chat_id=admin_id,
-                text=admin_text,
-                reply_markup=get_recharge_approval_keyboard(req.id),
-                parse_mode="HTML"
-            )
-        except Exception:
-            pass
+
+    if is_updated:
+        await callback.answer("🔄 Request updated! Please contact @tgekaiva to pay.")
+        await callback.message.edit_text(
+            f"🔄 <b>Purchase Request Updated!</b>\n\nYou updated your selection to: <b>{pkg_name}</b>\n\n"
+            "👉 <b>Please message @tgekaiva to complete your payment.</b>\n"
+            "Once payment is confirmed, your account will be upgraded instantly!",
+            parse_mode="HTML"
+        )
+    else:
+        await callback.answer("✅ Request sent! Please contact @tgekaiva to pay.")
+        await callback.message.edit_text(
+            f"✅ <b>Purchase Request Sent!</b>\n\nYou selected: <b>{pkg_name}</b>\n\n"
+            "👉 <b>Please message @tgekaiva to complete your payment.</b>\n"
+            "Once payment is confirmed, your account will be upgraded instantly!",
+            parse_mode="HTML"
+        )
+
+    await notify_admins_purchase_request(bot, req, user, pkg_name, is_updated=is_updated)
 
 
 @router.callback_query(F.data.startswith("buy_package_"))
@@ -792,10 +980,7 @@ async def cb_buy_package(callback: CallbackQuery, session: AsyncSession, bot: Bo
         
     req = await user_service.request_recharge(callback.from_user.id, package_val)
     if not req:
-        return await callback.answer(
-            "You already have a pending purchase request. Please wait for the admin to process it.",
-            show_alert=True
-        )
+        return await callback.answer("Failed to create purchase request. Please try again.", show_alert=True)
         
     if package_val == 15: pkg_name = "₹50 for 15 searches"
     elif package_val == 40: pkg_name = "₹100 for 40 searches"
@@ -803,41 +988,29 @@ async def cb_buy_package(callback: CallbackQuery, session: AsyncSession, bot: Bo
     elif package_val == -7: pkg_name = "₹700 for 7 days unlimited"
     else: pkg_name = f"{package_val} credits"
 
-    # ✅ CRITICAL FIX: answer the callback BEFORE editing the message.
-    # Without this, Telegram shows a 30-second spinning loader then silently
-    # fails — the user sees "nothing happen" even though the DB record was created.
-    await callback.answer("✅ Request sent! Please contact @tgekaiva to pay.")
+    is_updated = getattr(req, "is_updated", False)
 
-    await callback.message.edit_text(
-        f"✅ <b>Purchase Request Sent!</b>\n\nYou selected: <b>{pkg_name}</b>\n\n"
-        "👉 <b>Please message @tgekaiva to complete your payment.</b>\n"
-        "Once payment is confirmed, your account will be upgraded instantly!",
-        parse_mode="HTML"
-    )
-    
-    name = f"{user.first_name} {user.last_name or ''}".strip()
-    username = f"@{user.username}" if user.username else "None"
-    
-    admin_text = (
-        f"💳 <b>New Purchase Request #{req.id}</b>\n\n"
-        f"👤 <b>Name:</b> <a href='tg://user?id={callback.from_user.id}'>{name}</a>\n"
-        f"🔗 <b>Username:</b> {username}\n"
-        f"🆔 <b>User ID:</b> <code>{callback.from_user.id}</code>\n\n"
-        f"📦 <b>Package Selected:</b> {pkg_name}"
-    )
-    
-    from bot.keyboards.inline import get_recharge_approval_keyboard
-    for admin_id in config.admin_ids:
-        try:
-            await bot.send_message(
-                chat_id=admin_id,
-                text=admin_text,
-                reply_markup=get_recharge_approval_keyboard(req.id),
-                parse_mode="HTML"
-            )
-        except Exception:
-            pass
+    if is_updated:
+        await callback.answer("🔄 Request updated! Please contact @tgekaiva to pay.")
+        await callback.message.edit_text(
+            f"🔄 <b>Purchase Request Updated!</b>\n\nYou updated your selection to: <b>{pkg_name}</b>\n\n"
+            "👉 <b>Please message @tgekaiva to complete your payment.</b>\n"
+            "Once payment is confirmed, your account will be upgraded instantly!",
+            parse_mode="HTML"
+        )
+    else:
+        await callback.answer("✅ Request sent! Please contact @tgekaiva to pay.")
+        await callback.message.edit_text(
+            f"✅ <b>Purchase Request Sent!</b>\n\nYou selected: <b>{pkg_name}</b>\n\n"
+            "👉 <b>Please message @tgekaiva to complete your payment.</b>\n"
+            "Once payment is confirmed, your account will be upgraded instantly!",
+            parse_mode="HTML"
+        )
+
+    await notify_admins_purchase_request(bot, req, user, pkg_name, is_updated=is_updated)
 
 @router.message(Command("cancel"))
-async def cmd_cancel(message: Message):
-    await message.answer("Cancelled current operation.", reply_markup=None)
+async def cmd_cancel(message: Message, state: FSMContext):
+    await state.clear()
+    is_admin = message.from_user.id in config.admin_ids
+    await message.answer("❌ Current operation cancelled.", reply_markup=get_main_keyboard(is_admin))

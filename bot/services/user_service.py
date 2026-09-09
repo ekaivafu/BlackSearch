@@ -1,9 +1,9 @@
 import logging
 from typing import Optional, List, Tuple
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select, update, delete
+from sqlalchemy import select, update, delete, func
 from aiogram import Bot
-from bot.models.models import User, UserStatus, CreditTransaction, TransactionType, RechargeRequest, RechargeStatus, SearchLog
+from bot.models.models import User, UserStatus, CreditTransaction, TransactionType, RechargeRequest, RechargeStatus, SearchLog, Plan
 import datetime
 
 logger = logging.getLogger(__name__)
@@ -253,16 +253,19 @@ class UserService:
         await self.session.flush()
         return user
 
-    async def deduct_credit(self, telegram_id: int, amount: int = 1) -> bool:
-        """Deducts credit safely. Must be called in a transaction."""
+    async def deduct_credit(self, telegram_id: int, amount: int = 1) -> Tuple[bool, str]:
+        """Deducts credit safely. Must be called in a transaction.
+        Returns (success: bool, source: str) where source is 'unlimited', 'bonus', or 'permanent'.
+        """
         user = await self.get_user_by_telegram_id(telegram_id)
         if not user or user.status != UserStatus.APPROVED:
-            return False
+            return False, "unauthorized"
 
         # If user has an active unlimited subscription, allow the search for free
         now_utc = datetime.datetime.now(datetime.timezone.utc)
-        if user.subscription_end and user.subscription_end > now_utc:
-            return True
+        sub_end = user.subscription_end.replace(tzinfo=datetime.timezone.utc) if (user.subscription_end and user.subscription_end.tzinfo is None) else user.subscription_end
+        if sub_end and sub_end > now_utc:
+            return True, "unlimited"
 
         now = get_now_ist()
         if user.bonus_credits_expire_at and now > user.bonus_credits_expire_at:
@@ -271,14 +274,16 @@ class UserService:
 
         total_available = user.credits + (user.bonus_credits or 0)
         if total_available < amount:
-            return False
+            return False, "insufficient"
 
         # Deduct from expiring daily bonus credits first!
         remaining = amount
+        deducted_source = "permanent"
         if user.bonus_credits > 0:
             from_bonus = min(user.bonus_credits, remaining)
             user.bonus_credits -= from_bonus
             remaining -= from_bonus
+            deducted_source = "bonus"
 
         if remaining > 0:
             user.credits -= remaining
@@ -292,14 +297,23 @@ class UserService:
         )
         self.session.add(tx)
         await self.session.flush()
-        return True
+        return True, deducted_source
 
-    async def add_credit(self, telegram_id: int, amount: int = 1) -> bool:
-        """Adds credits safely (used for refunds or adjustments)."""
+    async def refund_credit(self, telegram_id: int, amount: int = 1, source: str = "permanent") -> bool:
+        """Adds credits back upon search failure or timeout.
+        If source is 'bonus', refunds to bonus_credits to prevent daily bonus conversion.
+        """
         user = await self.get_user_by_telegram_id(telegram_id)
         if not user:
             return False
-        user.credits += amount
+
+        if source == "bonus":
+            user.bonus_credits = (user.bonus_credits or 0) + amount
+            if not user.bonus_credits_expire_at:
+                user.bonus_credits_expire_at = get_end_of_today_ist()
+        else:
+            user.credits += amount
+
         tx = CreditTransaction(
             user_id=user.id,
             amount=amount,
@@ -311,6 +325,10 @@ class UserService:
         await self.session.flush()
         return True
 
+    async def add_credit(self, telegram_id: int, amount: int = 1) -> bool:
+        """Adds credits safely (used for manual adjustments)."""
+        return await self.refund_credit(telegram_id, amount=amount, source="permanent")
+
     async def request_recharge(self, telegram_id: int, amount: int, plan_id: Optional[int] = None) -> Optional[RechargeRequest]:
         user = await self.get_user_by_telegram_id(telegram_id)
         if not user:
@@ -321,10 +339,18 @@ class UserService:
             RechargeRequest.user_id == user.id,
             RechargeRequest.status == RechargeStatus.PENDING
         )
-        result = await self.session.execute(stmt)
-        if result.scalar_one_or_none():
-            return None # Already pending
-
+        res = await self.session.execute(stmt)
+        existing_req = res.scalar_one_or_none()
+        
+        if existing_req:
+            # Update the existing pending request with the newly selected plan
+            existing_req.requested_credits = amount
+            existing_req.plan_id = plan_id
+            existing_req.requested_at = datetime.datetime.now(datetime.timezone.utc)
+            await self.session.flush()
+            setattr(existing_req, "is_updated", True)
+            return existing_req
+        
         req = RechargeRequest(
             user_id=user.id,
             requested_credits=amount,
@@ -333,8 +359,26 @@ class UserService:
         )
         self.session.add(req)
         await self.session.flush()
+        setattr(req, "is_updated", False)
         return req
     
+    async def get_pending_recharges(self) -> List[Tuple[RechargeRequest, Optional[User], Optional[Plan]]]:
+        """Fetch all pending recharge requests along with User and Plan info ordered by requested_at."""
+        stmt = (
+            select(RechargeRequest, User, Plan)
+            .join(User, RechargeRequest.user_id == User.id, isouter=True)
+            .join(Plan, RechargeRequest.plan_id == Plan.id, isouter=True)
+            .where(RechargeRequest.status == RechargeStatus.PENDING)
+            .order_by(RechargeRequest.requested_at.asc())
+        )
+        result = await self.session.execute(stmt)
+        return list(result.all())
+
+    async def get_pending_recharge_count(self) -> int:
+        stmt = select(func.count(RechargeRequest.id)).where(RechargeRequest.status == RechargeStatus.PENDING)
+        res = await self.session.execute(stmt)
+        return res.scalar() or 0
+
     async def get_recharge_request(self, request_id: int) -> Optional[RechargeRequest]:
         stmt = select(RechargeRequest).where(RechargeRequest.id == request_id)
         res = await self.session.execute(stmt)
@@ -365,11 +409,13 @@ class UserService:
                 ps = PlanService(self.session)
                 plan = await ps.get_plan_by_id(req.plan_id)
 
+            now = datetime.datetime.now(datetime.timezone.utc)
+            sub_end = user.subscription_end.replace(tzinfo=datetime.timezone.utc) if (user.subscription_end and user.subscription_end.tzinfo is None) else user.subscription_end
+
             if plan:
                 from bot.models.models import PlanType
                 if plan.plan_type == PlanType.DAYS:
-                    now = datetime.datetime.now(datetime.timezone.utc)
-                    start_time = max(now, user.subscription_end) if user.subscription_end else now
+                    start_time = max(now, sub_end) if sub_end else now
                     user.subscription_end = start_time + datetime.timedelta(days=plan.days)
                     tx_amount = 0
                 else:
@@ -378,13 +424,11 @@ class UserService:
             else:
                 # Special legacy packages: -1 = 1 Day Unlimited, -7 = 7 Days Unlimited
                 if approved_amount == -1:
-                    now = datetime.datetime.now(datetime.timezone.utc)
-                    start_time = max(now, user.subscription_end) if user.subscription_end else now
+                    start_time = max(now, sub_end) if sub_end else now
                     user.subscription_end = start_time + datetime.timedelta(days=1)
                     tx_amount = 0 # No credit change
                 elif approved_amount == -7:
-                    now = datetime.datetime.now(datetime.timezone.utc)
-                    start_time = max(now, user.subscription_end) if user.subscription_end else now
+                    start_time = max(now, sub_end) if sub_end else now
                     user.subscription_end = start_time + datetime.timedelta(days=7)
                     tx_amount = 0 # No credit change
                 else:
@@ -488,4 +532,12 @@ class UserService:
         stmt = select(func.sum(User.credits)).where(User.status == UserStatus.APPROVED)
         stats["total_credits"] = (await self.session.execute(stmt)).scalar() or 0
         
+        # Active Subscriptions
+        now_utc = datetime.datetime.now(datetime.timezone.utc)
+        stmt = select(func.count(User.id)).where(User.subscription_end > now_utc)
+        stats["active_subs"] = (await self.session.execute(stmt)).scalar() or 0
+
+        # Pending Recharges
+        stmt = select(func.count(RechargeRequest.id)).where(RechargeRequest.status == RechargeStatus.PENDING)
+        stats["pending_recharges"] = (await self.session.execute(stmt)).scalar() or 0
         return stats

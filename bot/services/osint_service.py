@@ -1,6 +1,7 @@
 import asyncio
 import json
 import os
+import sys
 
 class OSINTService:
     @staticmethod
@@ -20,9 +21,9 @@ class OSINTService:
             # Get path to the holehe script
             script_path = os.path.join(os.path.dirname(__file__), "..", "scripts", "run_holehe.py")
             
-            # Run the script as a subprocess
+            # Run the script as a subprocess with current Python interpreter
             process = await asyncio.create_subprocess_exec(
-                "python", script_path, email,
+                sys.executable, script_path, email,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE
             )
@@ -67,7 +68,7 @@ class OSINTService:
             env = os.environ.copy()
             env["PYTHONUNBUFFERED"] = "1"
             process = await asyncio.create_subprocess_exec(
-                "sherlock", username, "--timeout", "5", "--print-found", "--no-color",
+                "sherlock", username, "--timeout", "2", "--print-found", "--no-color",
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.STDOUT,
                 env=env

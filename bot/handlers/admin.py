@@ -1,6 +1,10 @@
+import asyncio
+from typing import Tuple
+import html
 from aiogram import Router, F, Bot
 from aiogram.filters import Command
-from aiogram.types import Message, CallbackQuery, BufferedInputFile
+from aiogram.types import Message, CallbackQuery, BufferedInputFile, InlineKeyboardMarkup, InlineKeyboardButton
+from aiogram.utils.keyboard import InlineKeyboardBuilder
 from sqlalchemy.ext.asyncio import AsyncSession
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.context import FSMContext
@@ -68,10 +72,11 @@ def _generate_users_html(users: list) -> bytes:
     # ── Row builder ──────────────────────────────────────────────────────────
     rows_html = []
     for i, u in enumerate(users, 1):
-        name     = f"{u.first_name or ''} {u.last_name or ''}".strip() or "—"
-        username = f"@{u.username}" if u.username else "—"
-        uid      = str(u.telegram_user_id)
-        searches = str(u.total_searches)
+        raw_name = f"{u.first_name or ''} {u.last_name or ''}".strip() or "—"
+        name     = html.escape(raw_name)
+        username = f"@{html.escape(u.username)}" if u.username else "—"
+        uid      = html.escape(str(u.telegram_user_id))
+        searches = html.escape(str(u.total_searches))
         joined   = u.created_at.strftime("%Y-%m-%d") if u.created_at else "—"
 
         # Status badge
@@ -82,7 +87,7 @@ def _generate_users_html(users: list) -> bytes:
             "rejected": "badge-rejected",
             "disabled": "badge-disabled",
         }.get(status_val, "badge-disabled")
-        status_html = f'<span class="badge {badge_cls}">{status_val}</span>'
+        status_html = f'<span class="badge {badge_cls}">{html.escape(status_val)}</span>'
 
         # Plan & time/credits left
         has_active_sub = u.subscription_end and u.subscription_end > now_utc
@@ -196,25 +201,197 @@ def _generate_users_html(users: list) -> bytes:
 </html>"""
     return html.encode("utf-8")
 
+def get_admin_dashboard_keyboard(pending_recharge_count: int = 0) -> InlineKeyboardMarkup:
+    builder = InlineKeyboardBuilder()
+    if pending_recharge_count > 0:
+        builder.button(text=f"💳 Review Pending ({pending_recharge_count})", callback_data="admin_review_recharges")
+    builder.button(text="📦 Manage Plans", callback_data="admin_plans_open")
+    builder.button(text="📊 Bot Stats", callback_data="admin_stats_open")
+    builder.button(text="🔄 Refresh", callback_data="admin_dashboard_refresh")
+    builder.adjust(1 if pending_recharge_count > 0 else 2, 2)
+    return builder.as_markup()
+
+
+async def _build_admin_dashboard_text(session: AsyncSession) -> Tuple[str, int]:
+    user_service = UserService(session)
+    pending_recharges = await user_service.get_pending_recharges()
+    pending_users = await user_service.get_pending_users()
+    stats = await user_service.get_stats()
+
+    recharge_count = len(pending_recharges)
+    user_count = len(pending_users)
+
+    lines = [
+        "👑 <b>Admin Dashboard</b>\n",
+        f"💳 <b>Pending Payment Approvals:</b> <code>{recharge_count}</code>",
+        f"👥 <b>Pending User Registrations:</b> <code>{user_count}</code>",
+        f"👤 <b>Total Registered Users:</b> <code>{stats.get('total_users', 0)}</code>",
+        f"✅ <b>Approved Users:</b> <code>{stats.get('approved_users', 0)}</code>",
+        f"🚫 <b>Banned Users:</b> <code>{stats.get('banned_users', 0)}</code>",
+        f"👑 <b>Active Unlimited Passes:</b> <code>{stats.get('active_subs', 0)}</code>",
+        f"🔍 <b>Total Searches Run:</b> <code>{stats.get('total_searches', 0)}</code>",
+        f"🪙 <b>Floating Credits:</b> <code>{stats.get('total_credits', 0)}</code>\n",
+    ]
+
+    if recharge_count > 0:
+        lines.append("⏳ <b>Pending Payment Requests:</b>")
+        for i, (req, u, plan) in enumerate(pending_recharges[:10], 1):
+            name = (f"{u.first_name or ''} {u.last_name or ''}").strip() if u else "User"
+            uname = f"@{u.username}" if (u and u.username) else name
+            safe_uname = html.escape(uname)
+            tg_id = u.telegram_user_id if u else "N/A"
+            if plan:
+                pkg_str = plan.name if f"₹{plan.price}" in plan.name else f"{plan.name} (₹{plan.price})"
+            elif req.requested_credits == -1:
+                pkg_str = "1 Day Unlimited"
+            elif req.requested_credits == -7:
+                pkg_str = "7 Days Unlimited"
+            else:
+                pkg_str = f"{req.requested_credits} credits"
+            safe_pkg = html.escape(pkg_str)
+            lines.append(f"{i}. <b>Req #{req.id}</b> — {safe_uname} (<code>{tg_id}</code>): <b>{safe_pkg}</b>")
+
+        if recharge_count > 10:
+            lines.append(f"<i>...and {recharge_count - 10} more. Use /pending to view all.</i>")
+
+        lines.append("\n👉 Click <b>💳 Review Pending</b> below or type <code>/pending</code> to approve or reject them.")
+    else:
+        lines.append("<i>✅ All payment requests and user approvals are up to date!</i>")
+
+    return "\n".join(lines), recharge_count
+
+
 @router.message(Command("admin"))
 async def cmd_admin(message: Message, session: AsyncSession):
     if not is_admin(message.from_user.id):
         return await message.answer("Unauthorized.")
     
+    text, recharge_count = await _build_admin_dashboard_text(session)
+    await message.answer(text, reply_markup=get_admin_dashboard_keyboard(recharge_count), parse_mode="HTML")
+
+
+@router.callback_query(F.data == "admin_dashboard_refresh")
+async def cb_admin_dashboard_refresh(callback: CallbackQuery, session: AsyncSession):
+    if not is_admin(callback.from_user.id):
+        return await callback.answer("Unauthorized.", show_alert=True)
+    text, recharge_count = await _build_admin_dashboard_text(session)
+    try:
+        await callback.message.edit_text(text, reply_markup=get_admin_dashboard_keyboard(recharge_count), parse_mode="HTML")
+        await callback.answer("Dashboard refreshed! 🔄")
+    except Exception:
+        await callback.answer("Dashboard is already up to date! 🔄")
+
+
+@router.callback_query(F.data == "admin_stats_open")
+async def cb_admin_stats_open(callback: CallbackQuery, session: AsyncSession):
+    if not is_admin(callback.from_user.id):
+        return await callback.answer("Unauthorized.", show_alert=True)
     user_service = UserService(session)
-    pending_users = await user_service.get_pending_users()
-    
-    text = "Admin Dashboard\n\n"
-    text += f"Pending user requests: {len(pending_users)}\n"
-    # Further dashboard features can go here
-    
-    await message.answer(text)
+    stats = await user_service.get_stats()
+    text = (
+        "📊 <b>Detailed Bot Statistics</b>\n\n"
+        f"👥 <b>Total Users:</b> <code>{stats.get('total_users', 0)}</code>\n"
+        f"✅ <b>Approved Users:</b> <code>{stats.get('approved_users', 0)}</code>\n"
+        f"🚫 <b>Banned Users:</b> <code>{stats.get('banned_users', 0)}</code>\n"
+        f"👑 <b>Active Unlimited Passes:</b> <code>{stats.get('active_subs', 0)}</code>\n"
+        f"💳 <b>Pending Recharges:</b> <code>{stats.get('pending_recharges', 0)}</code>\n"
+        f"🔍 <b>Total Searches:</b> <code>{stats.get('total_searches', 0)}</code>\n"
+        f"🪙 <b>Total Credits in Accounts:</b> <code>{stats.get('total_credits', 0)}</code>"
+    )
+    builder = InlineKeyboardBuilder()
+    builder.button(text="🔙 Back to Dashboard", callback_data="admin_dashboard_refresh")
+    await callback.message.edit_text(text, reply_markup=builder.as_markup(), parse_mode="HTML")
+    await callback.answer()
+
+
+@router.callback_query(F.data == "admin_plans_open")
+async def cb_admin_plans_open(callback: CallbackQuery, session: AsyncSession):
+    if not is_admin(callback.from_user.id):
+        return await callback.answer("Unauthorized.", show_alert=True)
+    plan_service = PlanService(session)
+    plans = await plan_service.get_all_plans(active_only=False)
+    text = "<b>📦 Manage Subscription & Credit Packages</b>\n\n"
+    if plans:
+        for p in plans:
+            status_icon = "🟢" if p.is_active else "🔴"
+            val_str = f"{p.credits} credits" if p.plan_type == PlanType.CREDITS else f"{p.days} days"
+            text += f"{status_icon} <b>#{p.id} {html.escape(p.name)}</b>: ₹{p.price} ({val_str})\n"
+    else:
+        text += "<i>No packages configured yet.</i>\n"
+    await callback.message.answer(text, reply_markup=get_admin_plans_keyboard(), parse_mode="HTML")
+    await callback.answer()
+
+
+@router.message(Command("pending"))
+@router.message(Command("recharges"))
+@router.callback_query(F.data == "admin_review_recharges")
+async def show_pending_recharges(event: Message | CallbackQuery, session: AsyncSession, bot: Bot):
+    user_id = event.from_user.id
+    if not is_admin(user_id):
+        if isinstance(event, CallbackQuery):
+            return await event.answer("Unauthorized.", show_alert=True)
+        return await event.answer("Unauthorized.")
+
+    if isinstance(event, CallbackQuery):
+        await event.answer()
+
+    user_service = UserService(session)
+    pending_recharges = await user_service.get_pending_recharges()
+
+    if not pending_recharges:
+        msg_text = "✅ <b>No pending recharge requests!</b> All requests in database have been processed."
+        if isinstance(event, CallbackQuery):
+            return await event.message.answer(msg_text, parse_mode="HTML")
+        return await event.answer(msg_text, parse_mode="HTML")
+
+    header_text = f"📋 <b>Pending Payment Requests ({len(pending_recharges)})</b>\nReview each request below:"
+    if isinstance(event, CallbackQuery):
+        await event.message.answer(header_text, parse_mode="HTML")
+    else:
+        await event.answer(header_text, parse_mode="HTML")
+
+    for req, u, plan in pending_recharges:
+        full_name = f"{u.first_name or ''} {u.last_name or ''}".strip() if u else "User"
+        safe_name = html.escape(full_name)
+        username_str = f"@{u.username}" if (u and u.username) else "None"
+        safe_username = html.escape(username_str)
+        tg_id = u.telegram_user_id if u else "N/A"
+
+        if plan:
+            pkg_name = plan.name if f"₹{plan.price}" in plan.name else f"{plan.name} (₹{plan.price})"
+        elif req.requested_credits == -1:
+            pkg_name = "₹200 for 1 day unlimited"
+        elif req.requested_credits == -7:
+            pkg_name = "₹700 for 7 days unlimited"
+        else:
+            pkg_name = f"{req.requested_credits} credits"
+        safe_pkg = html.escape(pkg_name)
+
+        time_str = req.requested_at.strftime("%Y-%m-%d %H:%M UTC") if req.requested_at else "N/A"
+
+        card_text = (
+            f"💳 <b>Purchase Request #{req.id}</b>\n\n"
+            f"👤 <b>Name:</b> <a href='tg://user?id={tg_id}'>{safe_name}</a>\n"
+            f"🔗 <b>Username:</b> {safe_username}\n"
+            f"🆔 <b>User ID:</b> <code>{tg_id}</code>\n\n"
+            f"📦 <b>Package:</b> <b>{safe_pkg}</b>\n"
+            f"🕒 <b>Requested:</b> <code>{time_str}</code>"
+        )
+
+        reply_markup = get_recharge_approval_keyboard(req.id)
+        if isinstance(event, CallbackQuery):
+            await event.message.answer(card_text, reply_markup=reply_markup, parse_mode="HTML")
+        else:
+            await event.answer(card_text, reply_markup=reply_markup, parse_mode="HTML")
 
 @router.message(Command("addcredit"))
 async def cmd_addcredit(message: Message, session: AsyncSession):
     if not is_admin(message.from_user.id):
         return await message.answer("Unauthorized.")
     
+    if not message.text:
+        return await message.answer("Usage: /addcredit <telegram_user_id> <amount>")
+        
     parts = message.text.split()
     if len(parts) != 3:
         return await message.answer("Usage: /addcredit <telegram_user_id> <amount>")
@@ -285,10 +462,14 @@ async def btn_manage_users(message: Message, session: AsyncSession):
 
 
 @router.message(F.text == "💰 Manage Points")
-async def btn_manage_points(message: Message):
+async def btn_manage_points(message: Message, session: AsyncSession):
     if not is_admin(message.from_user.id):
         return
-    await message.answer(
+
+    user_service = UserService(session)
+    pending_count = await user_service.get_pending_recharge_count()
+
+    text = (
         "<b>💰 Manage Points & Plans</b>\n\n"
         "• To add credits manually:\n"
         "  <code>/addcredit &lt;user_id&gt; &lt;amount&gt;</code>\n"
@@ -297,9 +478,18 @@ async def btn_manage_points(message: Message):
         "  Type <code>/plans</code> or click <b>📦 Manage Plans</b> below.\n\n"
         "• To change new user free credits:\n"
         "  <code>/freecredits</code>\n\n"
-        "When users request a recharge, approval buttons appear here automatically.",
-        parse_mode="HTML"
     )
+    if pending_count > 0:
+        text += (
+            f"⚠️ <b>You have {pending_count} pending payment request(s) waiting for approval!</b>\n"
+            "Type <code>/pending</code> or click below to review."
+        )
+        builder = InlineKeyboardBuilder()
+        builder.button(text=f"💳 Review Pending ({pending_count})", callback_data="admin_review_recharges")
+        await message.answer(text, reply_markup=builder.as_markup(), parse_mode="HTML")
+    else:
+        text += "✅ All payment requests are processed. When users request a recharge, approval buttons appear here automatically."
+        await message.answer(text, parse_mode="HTML")
 
 @router.callback_query(F.data.startswith("approve_"))
 async def cb_approve_user(callback: CallbackQuery, session: AsyncSession, bot: Bot):
@@ -368,13 +558,17 @@ async def cb_approve_recharge(callback: CallbackQuery, session: AsyncSession, bo
         elif amount == -7: pkg = "7 Days Unlimited"
         else: pkg = f"{amount} credits"
         
-        await callback.message.edit_text(f"✅ Recharge #{req_id} approved for {pkg}.")
+        safe_pkg = html.escape(pkg)
+        await callback.message.edit_text(f"✅ Recharge #{req_id} approved for {safe_pkg}.", parse_mode="HTML")
         user = await session.get(User, req.user_id)
         if user:
             try:
-                await bot.send_message(user.telegram_user_id, f"✅ Your purchase for <b>{pkg}</b> was approved! Your account is upgraded.", parse_mode="HTML")
+                await bot.send_message(user.telegram_user_id, f"✅ Your purchase for <b>{safe_pkg}</b> was approved! Your account is upgraded.", parse_mode="HTML")
             except Exception:
-                pass
+                try:
+                    await bot.send_message(user.telegram_user_id, f"✅ Your purchase for {pkg} was approved! Your account is upgraded.")
+                except Exception:
+                    pass
     else:
         await callback.message.edit_text(f"❌ Recharge #{req_id} could not be approved. (Already processed?)")
     await callback.answer()
@@ -405,6 +599,9 @@ async def cmd_ban(message: Message, session: AsyncSession):
     if not is_admin(message.from_user.id):
         return await message.answer("Unauthorized.")
     
+    if not message.text:
+        return await message.answer("Usage: /ban <telegram_user_id>")
+        
     parts = message.text.split()
     if len(parts) != 2:
         return await message.answer("Usage: /ban <telegram_user_id>")
@@ -426,6 +623,9 @@ async def cmd_unban(message: Message, session: AsyncSession):
     if not is_admin(message.from_user.id):
         return await message.answer("Unauthorized.")
     
+    if not message.text:
+        return await message.answer("Usage: /unban <telegram_user_id>")
+        
     parts = message.text.split()
     if len(parts) != 2:
         return await message.answer("Usage: /unban <telegram_user_id>")
@@ -447,6 +647,9 @@ async def cmd_deleteuser(message: Message, session: AsyncSession):
     if not is_admin(message.from_user.id):
         return await message.answer("Unauthorized.")
     
+    if not message.text:
+        return await message.answer("Usage: /deleteuser <telegram_user_id>")
+        
     parts = message.text.split()
     if len(parts) != 2:
         return await message.answer(
@@ -502,24 +705,37 @@ async def cmd_broadcast(message: Message, session: AsyncSession, bot: Bot):
     if not is_admin(message.from_user.id):
         return await message.answer("Unauthorized.")
         
+    if not message.text:
+        return await message.answer("Usage: /broadcast <your message>")
+        
     parts = message.text.split(maxsplit=1)
     if len(parts) < 2:
         return await message.answer("Usage: /broadcast <your message>")
         
-    msg_text = parts[1]
+    msg_text = parts[1].strip()
     user_service = UserService(session)
     users = await user_service.get_all_approved_users()
     
     sent = 0
     failed = 0
-    await message.answer(f"Broadcasting to {len(users)} users...")
+    await message.answer(f"📢 Broadcasting announcement to {len(users)} approved users...")
+    
+    html_text = f"📢 <b>Announcement:</b>\n\n{msg_text}"
+    plain_text = f"📢 Announcement:\n\n{msg_text}"
     
     for u in users:
         try:
-            await bot.send_message(u.telegram_user_id, f"📢 <b>Announcement:</b>\n\n{msg_text}", parse_mode="HTML")
+            await bot.send_message(u.telegram_user_id, html_text, parse_mode="HTML")
             sent += 1
         except Exception:
-            failed += 1
+            # Fallback to plain text if HTML tags were invalid or unescaped
+            try:
+                await bot.send_message(u.telegram_user_id, plain_text)
+                sent += 1
+            except Exception:
+                failed += 1
+        # Respect Telegram's 30 messages/sec broadcast limit (approx 20 msgs/sec)
+        await asyncio.sleep(0.05)
             
     await message.answer(f"✅ Broadcast complete.\nSent: {sent}\nFailed: {failed}")
 
@@ -530,11 +746,13 @@ async def cmd_broadcast(message: Message, session: AsyncSession, bot: Bot):
 async def _build_plans_dashboard_text(session: AsyncSession) -> str:
     ps = PlanService(session)
     plans = await ps.get_all_plans(active_only=True)
+    initial_credits = await ps.get_initial_credits()
     daily_bonus = await ps.get_daily_bonus_credits()
     ref_reward = await ps.get_referral_reward_credits()
 
     lines = [
         "📦 <b>Plan Management Dashboard</b>\n",
+        f"🆓 <b>New User Free Credits:</b> <code>{initial_credits}</code> permanent credits upon registration",
         f"🎁 <b>Daily Free Bonus:</b> <code>{daily_bonus}</code> credits/day (expires at 23:59 IST)",
         f"👥 <b>Referral Reward:</b> <code>{ref_reward}</code> permanent credits / verified user\n",
         "📋 <b>Active Subscription & Credit Plans:</b>"
@@ -556,6 +774,7 @@ async def _build_plans_dashboard_text(session: AsyncSession) -> str:
         "• /createplan — Create a new plan\n"
         "• /editplan — Edit an existing plan\n"
         "• /deleteplan — Delete a plan\n"
+        "• /freecredits — Edit new user free credits\n"
         "• /dailybonus — Edit daily bonus credits\n"
         "• /referralreward — Edit referral reward credits"
     )
@@ -662,6 +881,8 @@ async def cb_create_type_days(callback: CallbackQuery, state: FSMContext):
 async def process_create_plan_value(message: Message, state: FSMContext):
     if not is_admin(message.from_user.id):
         return
+    if not message.text:
+        return await message.answer("⚠️ Please enter a valid number as text:")
     text = message.text.strip()
     if text == "/cancel":
         await state.clear()
@@ -688,6 +909,8 @@ async def process_create_plan_value(message: Message, state: FSMContext):
 async def process_create_plan_price(message: Message, state: FSMContext):
     if not is_admin(message.from_user.id):
         return
+    if not message.text:
+        return await message.answer("⚠️ Please enter a valid number as text:")
     text = message.text.strip()
     if text == "/cancel":
         await state.clear()
@@ -721,6 +944,8 @@ async def process_create_plan_price(message: Message, state: FSMContext):
 async def process_create_plan_name(message: Message, session: AsyncSession, state: FSMContext):
     if not is_admin(message.from_user.id):
         return
+    if not message.text:
+        return await message.answer("⚠️ Please enter a title as text:")
     text = message.text.strip()
     if text == "/cancel":
         await state.clear()
@@ -855,6 +1080,8 @@ async def cb_plan_field_select(callback: CallbackQuery, session: AsyncSession, s
 async def process_edit_plan_value(message: Message, session: AsyncSession, state: FSMContext):
     if not is_admin(message.from_user.id):
         return
+    if not message.text:
+        return await message.answer("⚠️ Please provide text input.")
     text = message.text.strip()
     if text == "/cancel":
         await state.clear()
@@ -968,23 +1195,60 @@ async def cb_do_delete_plan(callback: CallbackQuery, session: AsyncSession):
     await callback.message.edit_text(text, reply_markup=get_admin_plans_keyboard(), parse_mode="HTML")
     await callback.answer("Plan deleted!")
 
-# ── 🎁 EDIT FREE CREDITS FOR NEW USERS ───────────────────────────────────────
+# ── 🆓 EDIT FREE CREDITS FOR NEW USERS ───────────────────────────────────────
 
 @router.message(Command("freecredits"))
-async def cmd_freecredits(message: Message, session: AsyncSession, state: FSMContext):
-    if not is_admin(message.from_user.id):
+@router.callback_query(F.data == "admin_edit_free_credits")
+async def cb_edit_free_credits(event: Message | CallbackQuery, session: AsyncSession, state: FSMContext):
+    user_id = event.from_user.id
+    if not is_admin(user_id):
+        if isinstance(event, CallbackQuery):
+            await event.answer("Unauthorized.", show_alert=True)
         return
     await state.clear()
     ps = PlanService(session)
     cur_cred = await ps.get_initial_credits()
     await state.set_state(PlanAdminStates.free_credits)
-    await message.answer(
-        f"🎁 <b>Edit New User Free Credits</b>\n\n"
-        f"Currently, newly approved/registered users receive: <code>{cur_cred}</code> free credits.\n\n"
+    text = (
+        "🆓 <b>Edit New User Free Credits</b>\n\n"
+        f"Currently, newly registered/verified users receive: <code>{cur_cred}</code> permanent free credits.\n\n"
         "Send the new number of free credits to give to new users:\n"
-        "<i>(Enter 0 for no free credits, or 5, 10, etc.)\nSend /cancel to abort.</i>",
+        "<i>(Enter 0 for no free credits, or 5, 10, etc.)\nSend /cancel to abort.</i>"
+    )
+    if isinstance(event, CallbackQuery):
+        await event.message.edit_text(text, parse_mode="HTML")
+        await event.answer()
+    else:
+        await event.answer(text, parse_mode="HTML")
+
+
+@router.message(PlanAdminStates.free_credits)
+async def process_free_credits_value(message: Message, session: AsyncSession, state: FSMContext):
+    if not is_admin(message.from_user.id):
+        return
+    if not message.text:
+        return await message.answer("⚠️ Please enter a valid number as text:")
+    text = message.text.strip()
+    if text == "/cancel":
+        await state.clear()
+        return await message.answer("Operation cancelled.")
+    if not text.isdigit() or int(text) < 0:
+        return await message.answer("⚠️ Please enter a valid non-negative number (e.g. 0, 5, 10):")
+
+    val = int(text)
+    await state.clear()
+    ps = PlanService(session)
+    await ps.set_initial_credits(val)
+
+    await message.answer(
+        f"✅ <b>New User Free Credits Updated!</b>\n\n"
+        f"Newly registered users will now receive <b>{val}</b> permanent free credits upon joining.",
+        reply_markup=get_admin_plans_keyboard(),
         parse_mode="HTML"
     )
+
+
+# ── 🎁 EDIT DAILY BONUS CREDITS ──────────────────────────────────────────────
 
 @router.message(Command("dailybonus"))
 @router.callback_query(F.data == "admin_edit_daily_bonus")
@@ -1011,10 +1275,13 @@ async def cb_edit_daily_bonus(event: Message | CallbackQuery, session: AsyncSess
     else:
         await event.answer(text, parse_mode="HTML")
 
+
 @router.message(PlanAdminStates.daily_bonus)
 async def process_daily_bonus_value(message: Message, session: AsyncSession, state: FSMContext):
     if not is_admin(message.from_user.id):
         return
+    if not message.text:
+        return await message.answer("⚠️ Please enter a valid number as text:")
     text = message.text.strip()
     if text == "/cancel":
         await state.clear()
@@ -1033,15 +1300,6 @@ async def process_daily_bonus_value(message: Message, session: AsyncSession, sta
         reply_markup=get_admin_plans_keyboard(),
         parse_mode="HTML"
     )
-
-@router.message(Command("freecredits"))
-@router.callback_query(F.data == "admin_edit_free_credits")
-async def cb_edit_free_credits(event: Message | CallbackQuery, session: AsyncSession, state: FSMContext):
-    await cb_edit_daily_bonus(event, session, state)
-
-@router.message(PlanAdminStates.free_credits)
-async def process_free_credits_value(message: Message, session: AsyncSession, state: FSMContext):
-    await process_daily_bonus_value(message, session, state)
 
 @router.message(Command("referralreward"))
 @router.callback_query(F.data == "admin_edit_referral_reward")
@@ -1072,6 +1330,8 @@ async def cb_edit_referral_reward(event: Message | CallbackQuery, session: Async
 async def process_referral_reward_value(message: Message, session: AsyncSession, state: FSMContext):
     if not is_admin(message.from_user.id):
         return
+    if not message.text:
+        return await message.answer("⚠️ Please enter a valid number as text:")
     text = message.text.strip()
     if text == "/cancel":
         await state.clear()
@@ -1193,6 +1453,8 @@ async def cmd_add_channel(event: Message | CallbackQuery, bot: Bot, state: FSMCo
 async def process_channel_input(message: Message, bot: Bot, session: AsyncSession, state: FSMContext):
     if not is_admin(message.from_user.id):
         return
+    if not message.text:
+        return await message.answer("⚠️ Please send the channel @username or chat ID as text.")
     text = message.text.strip()
     if text == "/cancel":
         await state.clear()
@@ -1373,6 +1635,8 @@ async def cb_bl_add_username(callback: CallbackQuery, state: FSMContext):
 async def process_bl_phone(message: Message, session: AsyncSession, state: FSMContext):
     if not is_admin(message.from_user.id):
         return
+    if not message.text:
+        return await message.answer("⚠️ Please send the phone number as text.")
     text = message.text.strip()
     if text.startswith("/cancel"):
         await state.clear()
@@ -1408,6 +1672,8 @@ async def process_bl_phone(message: Message, session: AsyncSession, state: FSMCo
 async def process_bl_email(message: Message, session: AsyncSession, state: FSMContext):
     if not is_admin(message.from_user.id):
         return
+    if not message.text:
+        return await message.answer("⚠️ Please send the email address as text.")
     text = message.text.strip()
     if text.startswith("/cancel"):
         await state.clear()
@@ -1442,6 +1708,8 @@ async def process_bl_email(message: Message, session: AsyncSession, state: FSMCo
 async def process_bl_username(message: Message, session: AsyncSession, state: FSMContext):
     if not is_admin(message.from_user.id):
         return
+    if not message.text:
+        return await message.answer("⚠️ Please send the username as text.")
     text = message.text.strip()
     if text.startswith("/cancel"):
         await state.clear()

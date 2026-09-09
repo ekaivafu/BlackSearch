@@ -49,11 +49,12 @@ def get_admin_plans_keyboard() -> InlineKeyboardMarkup:
     builder.button(text="➕ Create Plan", callback_data="admin_plan_create")
     builder.button(text="✏️ Edit Plan", callback_data="admin_plan_list_edit")
     builder.button(text="🗑️ Delete Plan", callback_data="admin_plan_list_delete")
+    builder.button(text="🆓 New User Credits", callback_data="admin_edit_free_credits")
     builder.button(text="🎁 Daily Bonus", callback_data="admin_edit_daily_bonus")
     builder.button(text="👥 Referral Bonus", callback_data="admin_edit_referral_reward")
     builder.button(text="🔄 Refresh", callback_data="admin_plans_refresh")
     builder.button(text="❌ Close", callback_data="admin_plan_close")
-    builder.adjust(2, 2, 2, 1)
+    builder.adjust(2, 2, 2, 2)
     return builder.as_markup()
 
 def get_plan_type_selection_keyboard() -> InlineKeyboardMarkup:

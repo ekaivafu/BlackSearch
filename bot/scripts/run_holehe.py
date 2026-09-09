@@ -20,10 +20,10 @@ import httpx
 from holehe.core import import_submodules, get_functions, launch_module
 
 # ── Tuning ───────────────────────────────────────────────────────────────────
-CONCURRENCY  = 12       # max parallel requests
-JITTER_MIN   = 0.05     # seconds between slots (lower bound)
-JITTER_MAX   = 0.25
-TIMEOUT      = 15       # per-request timeout
+CONCURRENCY  = 24       # max parallel requests (doubled for speed)
+JITTER_MIN   = 0.02     # seconds between slots (lower bound)
+JITTER_MAX   = 0.10
+TIMEOUT      = 7        # per-request timeout (halved to prevent slow sites from lagging)
 
 BROWSER_HEADERS = {
     "User-Agent": (
