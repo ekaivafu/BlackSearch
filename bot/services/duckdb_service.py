@@ -284,10 +284,9 @@ def run_sync_search(search_type: str, query: str, limit: int = 10) -> dict:
         return cached
 
     if search_type == "phone":
-        # 🚀 Execute ICMR, Truecaller, and Inddata in PARALLEL simultaneously
+        # ⚡ Tier 1 (Ultra-fast: ~1.0-1.5s): Run indexed ICMR and Truecaller in parallel
         fut_main = pool.submit(_run_field_search, "phoneNumber", q, "exact", limit)
         fut_tc   = pool.submit(_run_truecaller_search, "phoneNumber", q, limit)
-        fut_ind  = pool.submit(_run_inddata_search, "phoneNumber", q, limit)
 
         try:
             main_data = fut_main.result()
@@ -301,12 +300,6 @@ def run_sync_search(search_type: str, query: str, limit: int = 10) -> dict:
             print(f"Truecaller search error: {e}")
             tc_res = []
 
-        try:
-            ind_res = fut_ind.result()
-        except Exception as e:
-            print(f"Inddata search error: {e}")
-            ind_res = []
-
         # Enrich main_data with Truecaller info if available
         if tc_res and main_data.get("results"):
             tc_row = tc_res[0]
@@ -318,12 +311,22 @@ def run_sync_search(search_type: str, query: str, limit: int = 10) -> dict:
         elif not main_data.get("results") and tc_res:
             main_data["results"] = tc_res
 
-        # Append Inddata results (up to limit)
+        # 🚀 INSTANT RETURN: If ICMR or Truecaller found results, return IMMEDIATELY!
+        # This completely skips the ~30s scan across 149GB unindexed Inddata parquet files.
+        if main_data.get("results"):
+            main_data["count"] = len(main_data["results"])
+            _set_cached_result(cache_key, main_data)
+            return main_data
+
+        # 🐢 Tier 2 (Deep Fallback): Only if 0 results found above, scan Inddata (149GB)
+        try:
+            ind_res = _run_inddata_search("phoneNumber", q, limit)
+        except Exception as e:
+            print(f"Inddata search error: {e}")
+            ind_res = []
+
         if ind_res:
-            cur_len = len(main_data.get("results", []))
-            rem = max(0, limit - cur_len)
-            if rem > 0:
-                main_data["results"].extend(ind_res[:rem])
+            main_data["results"] = ind_res[:limit]
 
         main_data["count"] = len(main_data.get("results", []))
         _set_cached_result(cache_key, main_data)
@@ -335,21 +338,12 @@ def run_sync_search(search_type: str, query: str, limit: int = 10) -> dict:
         return res
 
     elif search_type == "email":
-        # Run Truecaller and Inddata concurrently for email lookup
-        fut_tc  = pool.submit(_run_truecaller_search, "email", q, limit)
-        fut_ind = pool.submit(_run_inddata_search, "email", q, limit)
-
+        # ⚡ Tier 1 (Fast): Check Truecaller index first
         try:
-            tc_res = fut_tc.result()
+            tc_res = _run_truecaller_search("email", q, limit)
         except Exception as e:
             print(f"Truecaller email search error: {e}")
             tc_res = []
-
-        try:
-            ind_res = fut_ind.result()
-        except Exception as e:
-            print(f"Inddata email search error: {e}")
-            ind_res = []
 
         main_data = {"count": 0, "results": []}
 
@@ -369,9 +363,21 @@ def run_sync_search(search_type: str, query: str, limit: int = 10) -> dict:
             else:
                 main_data["results"] = tc_res
 
-        rem_limit = limit - len(main_data.get("results", []))
-        if rem_limit > 0 and ind_res:
-            main_data["results"].extend(ind_res[:rem_limit])
+        # If Truecaller or ICMR found results, return immediately!
+        if main_data.get("results"):
+            main_data["count"] = len(main_data["results"])
+            _set_cached_result(cache_key, main_data)
+            return main_data
+
+        # 🐢 Tier 2: Only fallback to 149GB Inddata if nothing found in Tier 1
+        try:
+            ind_res = _run_inddata_search("email", q, limit)
+        except Exception as e:
+            print(f"Inddata email search error: {e}")
+            ind_res = []
+
+        if ind_res:
+            main_data["results"] = ind_res[:limit]
 
         main_data["count"] = len(main_data.get("results", []))
         _set_cached_result(cache_key, main_data)
