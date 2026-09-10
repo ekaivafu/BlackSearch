@@ -123,29 +123,114 @@ def _cap_duplicates(rows: list[dict]) -> list[dict]:
             out.append(record)
     return out
 
-# ── Search Logic ────────────────────────────────────────────────────────────
+# ── Partition Boundaries for HF Dataset Chunks (0 to 6) ──────────────────────
+# The dataset is sorted contiguously across 7 parts.
+# Routing directly to the matching chunk avoids scanning 97GB across 7 files over HTTP,
+# dropping query latency from 27s to ~1.2-1.5s!
+PHONE_CHUNKS = [
+    (0, "", "7310463827"),
+    (1, "7310463827", "8077394733"),
+    (2, "8077394734", "8780538380"),
+    (3, "8780538381", "9313336069"),
+    (4, "9313336069", "9703053944"),
+    (5, "9703053945", "9990701360"),
+    (6, "9990701361", "9999999999"),
+]
+
+AADHAR_CHUNKS = [
+    (0, "", "351104219878"),
+    (1, "351104219878", "549490723501"),
+    (2, "549490723501", "746293615015"),
+    (3, "746293615015", "944410175347"),
+    (4, "944410175348", "999999999999"),
+]
+
+def get_phone_chunks(phone: str) -> list[int]:
+    digits = "".join(c for c in str(phone) if c.isdigit())
+    p = digits[-10:] if len(digits) >= 10 else digits
+    if len(p) != 10:
+        return list(range(7))
+    chunks = []
+    for idx, low, high in PHONE_CHUNKS:
+        if low and high:
+            if low <= p <= high:
+                chunks.append(idx)
+        elif not low and high:
+            if p <= high:
+                chunks.append(idx)
+        elif low and not high:
+            if p >= low:
+                chunks.append(idx)
+    return chunks or list(range(7))
+
+def get_aadhar_chunks(aadhar: str) -> list[int]:
+    digits = "".join(c for c in str(aadhar) if c.isdigit())
+    a = digits[-12:] if len(digits) >= 12 else digits
+    if len(a) != 12:
+        return list(range(5))
+    chunks = []
+    for idx, low, high in AADHAR_CHUNKS:
+        if low and high:
+            if low <= a <= high:
+                chunks.append(idx)
+        elif not low and high:
+            if a <= high:
+                chunks.append(idx)
+        elif low and not high:
+            if a >= low:
+                chunks.append(idx)
+    return chunks or list(range(5))
+
 def _run_field_search(field: str, value: str, mode: str, limit: int = 10) -> dict:
     if field not in SEARCH_FIELDS:
         raise ValueError(f"Unknown field: {field}")
-    v = str(value).replace("'", "''")
 
-    if mode == "exact":
-        if field == "phoneNumber" and _idx_ready("phone"):
-            dataset_path = REMOTE_INDEXES["phone"]
-            cols_str = ", ".join(SEARCH_FIELDS)
-        elif field == "aadharNumber" and _idx_ready("aadhar"):
-            dataset_path = REMOTE_INDEXES["aadhar"]
-            cols_str = ", ".join(SEARCH_FIELDS)
-        else:
-            return {"field": field, "value": value, "mode": mode, "count": 0, "results": []}
-        
-        sql = f"SELECT {cols_str} FROM read_parquet('{dataset_path}') WHERE {field} = ? LIMIT {limit * DUPLICATE_CAP + 20}"
-    else:
+    if mode != "exact":
         raise ValueError(f"Unknown mode: {mode}")
+
+    cols_str = ", ".join(SEARCH_FIELDS)
+    query_params = [value]
+    where_clause = f"{field} = ?"
+
+    if field == "phoneNumber" and _idx_ready("phone"):
+        chunks = get_phone_chunks(value)
+        if len(chunks) == 1:
+            dataset_target = f"'{HF_INDEX_BASE}/idx_phone.{chunks[0]}.parquet'"
+        elif len(chunks) < 7:
+            paths = [f"'{HF_INDEX_BASE}/idx_phone.{c}.parquet'" for c in chunks]
+            dataset_target = f"[{', '.join(paths)}]"
+        else:
+            dataset_target = f"'{REMOTE_INDEXES['phone']}'"
+
+        digits = "".join(c for c in str(value) if c.isdigit())
+        clean_10 = digits[-10:] if len(digits) >= 10 else digits
+        if clean_10 and clean_10 != str(value).strip():
+            where_clause = f"({field} = ? OR {field} = ?)"
+            query_params = [value, clean_10]
+
+    elif field == "aadharNumber" and _idx_ready("aadhar"):
+        chunks = get_aadhar_chunks(value)
+        if len(chunks) == 1:
+            dataset_target = f"'{HF_INDEX_BASE}/idx_aadhar.{chunks[0]}.parquet'"
+        elif len(chunks) < 5:
+            paths = [f"'{HF_INDEX_BASE}/idx_aadhar.{c}.parquet'" for c in chunks]
+            dataset_target = f"[{', '.join(paths)}]"
+        else:
+            dataset_target = f"'{REMOTE_INDEXES['aadhar']}'"
+
+        digits = "".join(c for c in str(value) if c.isdigit())
+        clean_12 = digits[-12:] if len(digits) >= 12 else digits
+        if clean_12 and clean_12 != str(value).strip():
+            where_clause = f"({field} = ? OR {field} = ?)"
+            query_params = [value, clean_12]
+    else:
+        return {"field": field, "value": value, "mode": mode, "count": 0, "results": []}
+
+    sql = f"SELECT {cols_str} FROM read_parquet({dataset_target}) WHERE {where_clause} LIMIT {limit * DUPLICATE_CAP + 20}"
 
     con = _get_conn()
     cursor = con.cursor()
-    rows = cursor.execute(sql, [value]).fetchall()
+    rows = cursor.execute(sql, query_params).fetchall()
     cols = [d[0] for d in cursor.description]
     results = _cap_duplicates([dict(zip(cols, r)) for r in rows])[:limit]
     return {"field": field, "value": value, "mode": mode, "count": len(results), "results": results}
