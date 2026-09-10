@@ -147,6 +147,124 @@ def clean_address(raw_addr: str) -> str:
         return ", ".join(cleaned_parts) + f" - {pincode}"
     return ", ".join(cleaned_parts)
 
+ADDRESS_ABBREVIATIONS = {
+    r'\bsec\b': 'sector',
+    r'\bsect\b': 'sector',
+    r'\bst\b': 'street',
+    r'\bstr\b': 'street',
+    r'\brd\b': 'road',
+    r'\bh\.?\s*no\.?\b': 'hno',
+    r'\bhouse\s*no\.?\b': 'hno',
+    r'\bflat\s*no\.?\b': 'flat',
+    r'\bflt\b': 'flat',
+    r'\bnagr\b': 'nagar',
+    r'\bngr\b': 'nagar',
+    r'\bclny\b': 'colony',
+    r'\bcol\b': 'colony',
+    r'\bextn?\b': 'extension',
+}
+
+ADDRESS_STOP_WORDS = {'na', 'null', 'none', 'near', 'opp', 'opposite', 'behind', 'dist', 'district', 'state', 'india', 'po'}
+
+def normalize_address(addr: str) -> str:
+    if not addr or is_invalid_val(addr):
+        return ""
+    text = re.sub(r'[!|,/\\-]', ' ', str(addr).lower())
+    for pat, rep in ADDRESS_ABBREVIATIONS.items():
+        text = re.sub(pat, rep, text)
+    tokens = [w for w in text.split() if w not in ADDRESS_STOP_WORDS and len(w) > 1]
+    return " ".join(tokens)
+
+def extract_pincode(addr: str) -> str:
+    if not addr or is_invalid_val(addr):
+        return ""
+    m = re.search(r'\b\d{6}\b', str(addr))
+    return m.group(0) if m else ""
+
+def extract_house_number(addr: str) -> str:
+    if not addr or is_invalid_val(addr):
+        return ""
+    parts = [p.strip() for p in str(addr).split('!') if p.strip()]
+    for p in parts[:3]:
+        if re.match(r'^(?:h(?:no|ouse)?\.?\s*)?([a-z0-9\-\/]+)$', p, re.I) and not re.match(r'^\d{6}$', p):
+            digits = re.findall(r'\d+', p)
+            if digits and int(digits[0]) < 10000:
+                return p.upper()
+    m = re.search(r'\b(?:h(?:no|ouse)?\.?\s*|flat\.?\s*|plot\.?\s*|#\s*)([a-z0-9\-\/]+)\b', str(addr), re.I)
+    if m:
+        return m.group(1).upper()
+    return ""
+
+def match_address_affinity(addr1: str, addr2: str) -> dict:
+    """Advanced address affinity matcher handling spelling variations, abbreviations, house numbers and pincodes."""
+    if not addr1 or not addr2 or is_invalid_val(addr1) or is_invalid_val(addr2):
+        return {"matched": False, "score": 0.0, "reason": ""}
+
+    pin1 = extract_pincode(addr1)
+    pin2 = extract_pincode(addr2)
+
+    hno1 = extract_house_number(addr1)
+    hno2 = extract_house_number(addr2)
+
+    norm1 = normalize_address(addr1)
+    norm2 = normalize_address(addr2)
+
+    tokens1 = set(norm1.split())
+    tokens2 = set(norm2.split())
+
+    intersection = tokens1.intersection(tokens2)
+    union = tokens1.union(tokens2)
+    jaccard = len(intersection) / len(union) if union else 0.0
+
+    same_pin = bool(pin1 and pin2 and pin1 == pin2)
+    same_hno = bool(hno1 and hno2 and (hno1 == hno2 or (hno1 in hno2 or hno2 in hno1)))
+
+    if same_hno and same_pin:
+        return {
+            "matched": True,
+            "confidence": "HIGH",
+            "score": 0.95,
+            "reason": f"Same House ({hno1}) & Pincode ({pin1})"
+        }
+    elif same_hno and jaccard >= 0.35:
+        return {
+            "matched": True,
+            "confidence": "HIGH",
+            "score": 0.85,
+            "reason": f"Same House ({hno1}) & Street Match"
+        }
+    elif same_pin and jaccard >= 0.35:
+        return {
+            "matched": True,
+            "confidence": "MEDIUM",
+            "score": 0.70,
+            "reason": f"Same Street & Pincode ({pin1})"
+        }
+    elif same_pin:
+        return {
+            "matched": True,
+            "confidence": "LOW",
+            "score": 0.40,
+            "reason": f"Same Pincode Area ({pin1})"
+        }
+    elif jaccard >= 0.5:
+        return {
+            "matched": True,
+            "confidence": "MEDIUM",
+            "score": 0.60,
+            "reason": "Matching Street Address"
+        }
+    else:
+        # Extract location city/district if present
+        parts = [p.strip() for p in str(addr2).split('!') if p.strip() and not is_invalid_val(p)]
+        loc = parts[-2] if len(parts) >= 2 else (pin2 if pin2 else "")
+        return {
+            "matched": False,
+            "confidence": "NONE",
+            "score": jaccard,
+            "reason": f"Current Loc: {loc.title()}" if loc else ""
+        }
+
 def _person_key(row: dict) -> tuple:
     ph = (row.get("phoneNumber") or "").strip()
     ad = (row.get("aadharNumber") or "").strip()
@@ -761,11 +879,9 @@ def run_deep_phone_search(phone: str, limit: int = 10) -> dict:
                 continue
             seen_fam.add(k)
 
-            # Determine matching criteria
+            # Determine matching criteria using parental lineage and advanced address affinity
             r_father = (r.get("fathersName") or "").strip()
             r_addr = str(r.get("address") or "").strip()
-            r_pin_match = re.search(r'\b\d{6}\b', r_addr)
-            r_pin = r_pin_match.group(0) if r_pin_match else ""
 
             reasons = []
             if target_father and r_father and target_father.lower() == r_father.lower():
@@ -773,10 +889,11 @@ def run_deep_phone_search(phone: str, limit: int = 10) -> dict:
             elif target.get("name") and r_father and str(target.get("name")).strip().lower() == r_father.lower():
                 reasons.append(f"Parent: {target.get('name')}")
 
-            if target_pin and r_pin and target_pin == r_pin:
-                reasons.append(f"Pincode: {target_pin}")
+            addr_affinity = match_address_affinity(target_addr, r_addr)
+            if addr_affinity.get("reason"):
+                reasons.append(addr_affinity["reason"])
 
-            r["match_reason"] = " & ".join(reasons) if reasons else (f"Father: {target_father}" if target_father else "Parental Lineage")
+            r["match_reason"] = " | ".join(reasons) if reasons else (f"Father: {target_father}" if target_father else "Parental Lineage")
             family_members.append(r)
 
     # Parse alt contacts

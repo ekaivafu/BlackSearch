@@ -880,6 +880,15 @@ async def process_search_input(message: Message, session: AsyncSession, state: F
     global search_queue_count
     search_queue_count += 1
     try:
+        coffee_msg = None
+        if search_type == "phone" and search_mode == "deep":
+            coffee_msg = await message.answer(
+                "☕ <b>Grab your coffee!</b> 🔬\n\n"
+                "<i>Deep Search is launching heavy multi-hop reconnaissance across 97GB+ of intelligence databases, tracing linked SIMs, household registries, and digital archives...\n"
+                "This may take a few moments!</i>",
+                parse_mode="HTML"
+            )
+
         # Since MotherDuck can easily handle 15 active searches at once, the first 15 people are NOT in a queue!
         if search_queue_count > 15:
             wait_msg = await message.answer(f"⏳ <b>You are in a queue!</b>\nPeople ahead of you: {search_queue_count - 15}\n<i>I will notify you when your search is over.</i>", parse_mode="HTML")
@@ -959,11 +968,16 @@ async def process_search_input(message: Message, session: AsyncSession, state: F
 
         result = search_task.result()
 
-        # Delete waiting message
+        # Delete waiting message and coffee notice
         try:
             await wait_msg.delete()
         except Exception:
             pass
+        if coffee_msg:
+            try:
+                await coffee_msg.delete()
+            except Exception:
+                pass
     finally:
         search_queue_count -= 1
 
