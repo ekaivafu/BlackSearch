@@ -85,6 +85,40 @@ class User(Base):
     referral_count = Column(Integer, default=0, nullable=False)
     referral_credits_earned = Column(Integer, default=0, nullable=False)
 
+    @property
+    def has_active_subscription(self) -> bool:
+        if not self.subscription_end:
+            return False
+        now_utc = datetime.datetime.now(datetime.timezone.utc)
+        sub_end = self.subscription_end
+        if sub_end.tzinfo is None:
+            sub_end = sub_end.replace(tzinfo=datetime.timezone.utc)
+        return sub_end > now_utc
+
+    @property
+    def subscription_remaining_time(self) -> tuple[int, int] | None:
+        """Returns (days, hours) remaining, or None if not active."""
+        if not self.subscription_end:
+            return None
+        now_utc = datetime.datetime.now(datetime.timezone.utc)
+        sub_end = self.subscription_end
+        if sub_end.tzinfo is None:
+            sub_end = sub_end.replace(tzinfo=datetime.timezone.utc)
+        if sub_end <= now_utc:
+            return None
+        diff = sub_end - now_utc
+        return diff.days, diff.seconds // 3600
+
+    @property
+    def has_active_bonus(self) -> bool:
+        exp = getattr(self, "bonus_credits_expire_at", None)
+        if not exp or (getattr(self, "bonus_credits", 0) or 0) <= 0:
+            return False
+        now_utc = datetime.datetime.now(datetime.timezone.utc)
+        if exp.tzinfo is None:
+            exp = exp.replace(tzinfo=datetime.timezone.utc)
+        return exp > now_utc
+
 class RechargeRequest(Base):
     __tablename__ = "recharge_requests"
 

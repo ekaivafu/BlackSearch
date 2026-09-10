@@ -20,6 +20,15 @@ def get_end_of_today_ist() -> datetime.datetime:
     now = get_now_ist()
     return datetime.datetime(now.year, now.month, now.day, 23, 59, 59, tzinfo=IST)
 
+def _to_ist(dt: Optional[datetime.datetime]) -> Optional[datetime.datetime]:
+    if not dt:
+        return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=datetime.timezone.utc).astimezone(IST)
+    else:
+        dt = dt.astimezone(IST)
+    return dt
+
 class UserService:
     def __init__(self, session: AsyncSession):
         self.session = session
@@ -37,7 +46,7 @@ class UserService:
         """
         now = get_now_ist()
         # 1. Expire outdated bonus credits if past expiration
-        if user.bonus_credits_expire_at and now > user.bonus_credits_expire_at:
+        if user.bonus_credits_expire_at and now > _to_ist(user.bonus_credits_expire_at):
             user.bonus_credits = 0
             user.bonus_credits_expire_at = None
 
@@ -67,7 +76,7 @@ class UserService:
     @staticmethod
     def get_effective_credits(user: User) -> int:
         now = get_now_ist()
-        if user.bonus_credits_expire_at and now > user.bonus_credits_expire_at:
+        if user.bonus_credits_expire_at and now > _to_ist(user.bonus_credits_expire_at):
             user.bonus_credits = 0
             user.bonus_credits_expire_at = None
         return user.credits + (user.bonus_credits or 0)
@@ -262,13 +271,11 @@ class UserService:
             return False, "unauthorized"
 
         # If user has an active unlimited subscription, allow the search for free
-        now_utc = datetime.datetime.now(datetime.timezone.utc)
-        sub_end = user.subscription_end.replace(tzinfo=datetime.timezone.utc) if (user.subscription_end and user.subscription_end.tzinfo is None) else user.subscription_end
-        if sub_end and sub_end > now_utc:
+        if getattr(user, "has_active_subscription", False):
             return True, "unlimited"
 
         now = get_now_ist()
-        if user.bonus_credits_expire_at and now > user.bonus_credits_expire_at:
+        if user.bonus_credits_expire_at and now > _to_ist(user.bonus_credits_expire_at):
             user.bonus_credits = 0
             user.bonus_credits_expire_at = None
 

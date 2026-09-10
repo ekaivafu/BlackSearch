@@ -37,10 +37,9 @@ def build_welcome_text(user: User, is_admin: bool) -> str:
     if is_admin:
         quota_display = "♾️ Unlimited 👑"
         tier_display = "👑 System Administrator"
-    elif user.subscription_end and user.subscription_end > now_utc:
-        diff = user.subscription_end - now_utc
-        days = diff.days
-        hours = diff.seconds // 3600
+    elif user.has_active_subscription:
+        rem = user.subscription_remaining_time
+        days, hours = rem if rem else (0, 0)
         quota_display = f"♾️ Unlimited ({days}d {hours}h left)"
         tier_display = "💎 VIP Unlimited Pass"
     elif effective_credits > 0:
@@ -200,7 +199,7 @@ async def cmd_start(message: Message, session: AsyncSession, bot: Bot):
         parse_mode="HTML"
     )
     
-    if not is_admin and effective_credits == 0 and not (user.subscription_end and user.subscription_end > now_utc):
+    if not is_admin and effective_credits == 0 and not user.has_active_subscription:
         await message.answer(
             "⚠️ <b>Notice:</b> You have <b>0 search credits</b> remaining.\n"
             "Click <b>💳 Request Recharge</b> below to purchase search packs or activate Unlimited VIP access!",
@@ -256,10 +255,9 @@ async def cmd_status(message: Message, session: AsyncSession):
     if is_admin:
         credits_display = "♾️ Unlimited 👑"
         plan_badge = "👑 System Administrator"
-    elif user.subscription_end and user.subscription_end > now_utc:
-        diff = user.subscription_end - now_utc
-        days = diff.days
-        hours = diff.seconds // 3600
+    elif user.has_active_subscription:
+        rem = user.subscription_remaining_time
+        days, hours = rem if rem else (0, 0)
         credits_display = f"♾️ Unlimited ({days}d {hours}h left)"
         plan_badge = "👑 VIP Unlimited Pass"
     elif effective_credits > 0:
@@ -371,9 +369,7 @@ async def cmd_search(message: Message, session: AsyncSession):
     await user_service.check_and_apply_daily_bonus(user)
     effective_credits = UserService.get_effective_credits(user)
 
-    import datetime
-    now_utc = datetime.datetime.now(datetime.timezone.utc)
-    has_sub = user.subscription_end and user.subscription_end > now_utc
+    has_sub = user.has_active_subscription
 
     if effective_credits < 1 and not has_sub and message.from_user.id not in config.admin_ids:
         return await message.answer(
@@ -582,7 +578,8 @@ async def process_search_input(message: Message, session: AsyncSession, state: F
     }
 
     ADMIN_NAV_BUTTONS = [
-        "⚙️ Manage Users", "💰 Manage Points", "📦 Manage Plans", "📢 Channels", "🚫 Blocklist"
+        "⚙️ Manage Users", "⚙ Manage Users", "Manage Users",
+        "💰 Manage Points", "📦 Manage Plans", "📢 Channels", "🚫 Blocklist"
     ]
 
     if query in NAV_ACTIONS:
@@ -599,6 +596,8 @@ async def process_search_input(message: Message, session: AsyncSession, state: F
         )
         admin_actions = {
             "⚙️ Manage Users": lambda: btn_manage_users(message, session),
+            "⚙ Manage Users": lambda: btn_manage_users(message, session),
+            "Manage Users": lambda: btn_manage_users(message, session),
             "💰 Manage Points": lambda: btn_manage_points(message, session),
             "📦 Manage Plans": lambda: cmd_manage_plans(message, session, state),
             "📢 Channels": lambda: cmd_manage_channels(message, session, state),
@@ -695,9 +694,7 @@ async def process_search_input(message: Message, session: AsyncSession, state: F
     deducted_source = None
     has_sub = False
     if not is_admin:
-        import datetime
-        now_utc = datetime.datetime.now(datetime.timezone.utc)
-        has_sub = bool(user.subscription_end and user.subscription_end > now_utc)
+        has_sub = user.has_active_subscription
         await user_service.check_and_apply_daily_bonus(user)
         effective_credits = UserService.get_effective_credits(user)
 
@@ -795,7 +792,7 @@ async def process_search_input(message: Message, session: AsyncSession, state: F
         now_utc = datetime.datetime.now(datetime.timezone.utc)
         if is_admin:
             credits_display = "Unlimited 👑"
-        elif user.subscription_end and user.subscription_end > now_utc:
+        elif user.has_active_subscription:
             credits_display = f"Unlimited ({user.subscription_end.strftime('%Y-%m-%d')})"
         else:
             effective_credits = UserService.get_effective_credits(user)

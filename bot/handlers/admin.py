@@ -1,7 +1,10 @@
 import asyncio
+import logging
 from typing import Tuple
 import html
 from aiogram import Router, F, Bot
+
+logger = logging.getLogger(__name__)
 from aiogram.filters import Command
 from aiogram.types import Message, CallbackQuery, BufferedInputFile, InlineKeyboardMarkup, InlineKeyboardButton
 from aiogram.utils.keyboard import InlineKeyboardBuilder
@@ -66,7 +69,7 @@ def _generate_users_html(users: list) -> bytes:
     rejected = sum(1 for u in users if u.status == UserStatus.REJECTED)
     active_subs = sum(
         1 for u in users
-        if u.subscription_end and u.subscription_end > now_utc
+        if getattr(u, "has_active_subscription", False)
     )
 
     # ── Row builder ──────────────────────────────────────────────────────────
@@ -90,18 +93,17 @@ def _generate_users_html(users: list) -> bytes:
         status_html = f'<span class="badge {badge_cls}">{html.escape(status_val)}</span>'
 
         # Plan & time/credits left
-        has_active_sub = u.subscription_end and u.subscription_end > now_utc
+        has_active_sub = getattr(u, "has_active_subscription", False)
         if has_active_sub:
-            delta   = u.subscription_end - now_utc
-            days    = delta.days
-            hours   = delta.seconds // 3600
+            rem = getattr(u, "subscription_remaining_time", None)
+            days, hours = rem if rem else (0, 0)
             plan_html = '<span class="plan-unlimited">&#x267e;&#xfe0f; Unlimited</span>'
             left_html = f'<span class="plan-unlimited">{days}d {hours}h left</span>'
-        elif u.subscription_end and u.subscription_end <= now_utc:
+        elif u.subscription_end and not has_active_sub:
             plan_html = '<span class="plan-expired">Subscription Expired</span>'
             left_html = f'<span class="plan-credits">{u.credits} credits</span>'
         else:
-            bonus = getattr(u, "bonus_credits", 0) if (getattr(u, "bonus_credits_expire_at", None) and getattr(u, "bonus_credits_expire_at") > now_utc) else 0
+            bonus = getattr(u, "bonus_credits", 0) if getattr(u, "has_active_bonus", False) else 0
             if u.credits > 0 or bonus > 0:
                 parts = []
                 if bonus > 0:
@@ -131,7 +133,7 @@ def _generate_users_html(users: list) -> bytes:
     rows = "\n".join(rows_html) if rows_html else '<tr><td colspan="9" style="text-align:center;color:#8b949e">No users found.</td></tr>'
     generated_at = now_utc.strftime("%Y-%m-%d %H:%M:%S")
 
-    html = f"""<!DOCTYPE html>
+    html_content = f"""<!DOCTYPE html>
 <html lang="en">
 <head>
   <meta charset="UTF-8">
@@ -199,7 +201,7 @@ def _generate_users_html(users: list) -> bytes:
   </table>
 </body>
 </html>"""
-    return html.encode("utf-8")
+    return html_content.encode("utf-8")
 
 def get_admin_dashboard_keyboard(pending_recharge_count: int = 0) -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
@@ -420,31 +422,41 @@ async def cmd_addcredit(message: Message, session: AsyncSession):
     await session.flush()
     await message.answer(f"Added {amount} credits to user {target_id}. New balance: {user.credits}")
 
-@router.message(F.text == "⚙️ Manage Users")
+@router.message(F.text.in_({"⚙️ Manage Users", "⚙ Manage Users", "Manage Users"}))
+@router.message(Command("users"))
+@router.message(Command("manageusers"))
 async def btn_manage_users(message: Message, session: AsyncSession):
     if not is_admin(message.from_user.id):
-        return
+        return await message.answer("⛔ Access denied. Administrator only.")
 
     user_service = UserService(session)
     users = await user_service.get_all_users()
 
     # ── Send HTML report ──────────────────────────────────────────────────────
-    html_bytes = _generate_users_html(users)
-    filename = f"users_{datetime.datetime.now(datetime.timezone.utc).strftime('%Y%m%d_%H%M%S')}.html"
+    try:
+        html_bytes = _generate_users_html(users)
+        filename = f"users_{datetime.datetime.now(datetime.timezone.utc).strftime('%Y%m%d_%H%M%S')}.html"
 
-    await message.answer_document(
-        document=BufferedInputFile(html_bytes, filename=filename),
-        caption=(
-            f"<b>&#128209; User Report</b>\n"
-            f"Total: <b>{len(users)}</b> users\n"
-            f"Open the HTML file in any browser for the full styled table."
-        ),
-        parse_mode="HTML"
-    )
+        await message.answer_document(
+            document=BufferedInputFile(html_bytes, filename=filename),
+            caption=(
+                f"<b>📋 User Report</b>\n"
+                f"Total: <b>{len(users)}</b> users\n"
+                f"Open the HTML file in any browser for the full styled table."
+            ),
+            parse_mode="HTML"
+        )
+    except Exception as e:
+        logger.error(f"Failed to generate/send users HTML report: {e}", exc_info=True)
+        await message.answer(
+            f"⚠️ <i>Could not generate full file report: {html.escape(str(e))}</i>\n"
+            f"Total registered users in database: <b>{len(users)}</b>",
+            parse_mode="HTML"
+        )
 
     # ── Also send the admin commands reference ────────────────────────────────
     await message.answer(
-        "<b>&#9881;&#65039; Manage Users — Commands</b>\n\n"
+        "<b>⚙️ Manage Users — Commands</b>\n\n"
         "New user requests are sent to you automatically for approval.\n\n"
         "<b>Dashboard &amp; Stats:</b>\n"
         "  /admin — Admin dashboard\n"
