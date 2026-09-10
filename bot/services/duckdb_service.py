@@ -6,7 +6,7 @@ import duckdb
 # ── Config ──────────────────────────────────────────────────────────────────
 HF_INDEX_BASE = os.environ.get(
     "ICMR_HF_INDEX_BASE",
-    "hf://datasets/WipeX00/scrappeddata"
+    "hf://datasets/eKaiva/scrappeddataset"
 ).rstrip("/")
 PARALLELISM = int(os.environ.get("ICMR_PARALLEL", "15")) # 🚀 Increased to 15 because MotherDuck is handling the load!
 THREADS_PER_CONN = int(os.environ.get("ICMR_THREADS_PER_CONN", "2"))
@@ -203,10 +203,8 @@ def _run_inddata_search(field: str, value: str, limit: int = 10) -> list[dict]:
     con = _get_conn()
     cursor = con.cursor()
     
-    # 🚀 Column projection optimization: only fetch required fields instead of SELECT *
-    # to dramatically reduce Parquet HTTP decompressed bandwidth across all 120 chunks
-    cols_needed = "name, fname, mobile, alt, address, circle, email"
-    sql = f"SELECT {cols_needed} FROM read_parquet('{INDDATA_INDEX}') WHERE {query_field} = '{v}' LIMIT {limit}"
+    # 🚀 Native MotherDuck 104M Email Vault (< 50ms)
+    sql = f"SELECT mobile, email, name, circle FROM my_db.ind_emails WHERE {query_field} = '{v}' LIMIT {limit}"
     
     try:
         rows = cursor.execute(sql).fetchall()
@@ -217,13 +215,10 @@ def _run_inddata_search(field: str, value: str, limit: int = 10) -> list[dict]:
         for row in raw_results:
             mapped_results.append({
                 "name": row.get("name"),
-                "fathersName": row.get("fname"),
                 "phoneNumber": row.get("mobile"),
-                "otherNumber": row.get("alt"),
-                "address": row.get("address"),
                 "state": row.get("circle"),
                 "Email": row.get("email"),
-                "source": "Inddata (1.7B)"
+                "source": "Inddata Email Vault (104M)"
             })
         return mapped_results
     except Exception as e:
@@ -284,9 +279,10 @@ def run_sync_search(search_type: str, query: str, limit: int = 10) -> dict:
         return cached
 
     if search_type == "phone":
-        # ⚡ Tier 1 (Ultra-fast: ~1.0-1.5s): Run indexed ICMR and Truecaller in parallel
+        # 🚀 Execute ICMR, Truecaller, and native 104M Email Vault simultaneously in PARALLEL (<1.5s total)
         fut_main = pool.submit(_run_field_search, "phoneNumber", q, "exact", limit)
         fut_tc   = pool.submit(_run_truecaller_search, "phoneNumber", q, limit)
+        fut_ind  = pool.submit(_run_inddata_search, "phoneNumber", q, limit)
 
         try:
             main_data = fut_main.result()
@@ -300,33 +296,36 @@ def run_sync_search(search_type: str, query: str, limit: int = 10) -> dict:
             print(f"Truecaller search error: {e}")
             tc_res = []
 
-        # Enrich main_data with Truecaller info if available
+        try:
+            ind_res = fut_ind.result()
+        except Exception as e:
+            print(f"Inddata search error: {e}")
+            ind_res = []
+
+        # 1. Enrich main_data with Truecaller info
         if tc_res and main_data.get("results"):
             tc_row = tc_res[0]
             for r in main_data["results"]:
-                r["Email"] = tc_row.get("Email")
+                if not r.get("Email") and tc_row.get("Email"):
+                    r["Email"] = tc_row.get("Email")
                 r["Carrier"] = tc_row.get("Carrier")
                 r["Gender"] = tc_row.get("Gender")
                 r["Truecaller_Name"] = tc_row.get("Name")
         elif not main_data.get("results") and tc_res:
             main_data["results"] = tc_res
 
-        # 🚀 INSTANT RETURN: If ICMR or Truecaller found results, return IMMEDIATELY!
-        # This completely skips the ~30s scan across 149GB unindexed Inddata parquet files.
-        if main_data.get("results"):
-            main_data["count"] = len(main_data["results"])
-            _set_cached_result(cache_key, main_data)
-            return main_data
-
-        # 🐢 Tier 2 (Deep Fallback): Only if 0 results found above, scan Inddata (149GB)
-        try:
-            ind_res = _run_inddata_search("phoneNumber", q, limit)
-        except Exception as e:
-            print(f"Inddata search error: {e}")
-            ind_res = []
-
+        # 2. Enrich with verified Email from the 104M Inddata vault
         if ind_res:
-            main_data["results"] = ind_res[:limit]
+            ind_email = ind_res[0].get("Email")
+            if ind_email:
+                if main_data.get("results"):
+                    for r in main_data["results"]:
+                        if not r.get("Email"):
+                            r["Email"] = ind_email
+                else:
+                    main_data["results"] = ind_res
+            elif not main_data.get("results"):
+                main_data["results"] = ind_res
 
         main_data["count"] = len(main_data.get("results", []))
         _set_cached_result(cache_key, main_data)
@@ -338,46 +337,44 @@ def run_sync_search(search_type: str, query: str, limit: int = 10) -> dict:
         return res
 
     elif search_type == "email":
-        # ⚡ Tier 1 (Fast): Check Truecaller index first
+        # ⚡ Query Truecaller and 104M Inddata Email Vault concurrently (<100ms)
+        fut_tc  = pool.submit(_run_truecaller_search, "email", q, limit)
+        fut_ind = pool.submit(_run_inddata_search, "email", q, limit)
+
         try:
-            tc_res = _run_truecaller_search("email", q, limit)
+            tc_res = fut_tc.result()
         except Exception as e:
             print(f"Truecaller email search error: {e}")
             tc_res = []
 
-        main_data = {"count": 0, "results": []}
-
-        if tc_res:
-            phone = tc_res[0].get("Number")
-            if phone:
-                main_data = _run_field_search("phoneNumber", phone, "exact", limit)
-                tc_row = tc_res[0]
-                if main_data.get("results"):
-                    for r in main_data["results"]:
-                        r["Email"] = tc_row.get("Email")
-                        r["Carrier"] = tc_row.get("Carrier")
-                        r["Gender"] = tc_row.get("Gender")
-                        r["Truecaller_Name"] = tc_row.get("Name")
-                else:
-                    main_data["results"] = tc_res
-            else:
-                main_data["results"] = tc_res
-
-        # If Truecaller or ICMR found results, return immediately!
-        if main_data.get("results"):
-            main_data["count"] = len(main_data["results"])
-            _set_cached_result(cache_key, main_data)
-            return main_data
-
-        # 🐢 Tier 2: Only fallback to 149GB Inddata if nothing found in Tier 1
         try:
-            ind_res = _run_inddata_search("email", q, limit)
+            ind_res = fut_ind.result()
         except Exception as e:
             print(f"Inddata email search error: {e}")
             ind_res = []
 
-        if ind_res:
-            main_data["results"] = ind_res[:limit]
+        main_data = {"count": 0, "results": []}
+
+        # Resolve phone number from either Truecaller or 104M Inddata
+        phone = None
+        if tc_res and tc_res[0].get("Number"):
+            phone = tc_res[0].get("Number")
+        elif ind_res and ind_res[0].get("phoneNumber"):
+            phone = ind_res[0].get("phoneNumber")
+
+        if phone:
+            main_data = _run_field_search("phoneNumber", phone, "exact", limit)
+            if main_data.get("results"):
+                for r in main_data["results"]:
+                    r["Email"] = q
+                    if tc_res:
+                        r["Carrier"] = tc_res[0].get("Carrier")
+                        r["Gender"] = tc_res[0].get("Gender")
+                        r["Truecaller_Name"] = tc_res[0].get("Name")
+            else:
+                main_data["results"] = ind_res or tc_res
+        else:
+            main_data["results"] = ind_res or tc_res
 
         main_data["count"] = len(main_data.get("results", []))
         _set_cached_result(cache_key, main_data)
