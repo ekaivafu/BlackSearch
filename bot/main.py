@@ -58,8 +58,24 @@ async def main():
     # Database auto-migration and plan seeding
     await init_db()
 
+    # Pre-warm DuckDB caches in background thread so all searches are instant (<1.5s)
+    duckdb_service.start_background_warmup()
+
+    # Handle graceful shutdown on Render (SIGTERM/SIGINT) to prevent TelegramConflictError during deploys
+    import signal
+    loop = asyncio.get_running_loop()
+    for sig in (getattr(signal, "SIGTERM", None), getattr(signal, "SIGINT", None)):
+        if sig is not None:
+            try:
+                loop.add_signal_handler(sig, lambda: asyncio.create_task(dp.stop_polling()))
+            except (NotImplementedError, RuntimeError, AttributeError):
+                pass
+
     logger.info("Starting bot...")
-    await dp.start_polling(bot)
+    try:
+        await dp.start_polling(bot)
+    finally:
+        await bot.session.close()
 
 if __name__ == "__main__":
     asyncio.run(main())

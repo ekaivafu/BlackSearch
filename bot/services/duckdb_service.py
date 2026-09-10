@@ -93,6 +93,27 @@ def _get_conn():
             
     return _global_conn
 
+def warmup_cache():
+    """Background warm-up: touches chunks so footers and TCP connections are warm in DuckDB memory."""
+    try:
+        con = _get_conn()
+        cur = con.cursor()
+        print("🔥 Pre-warming Parquet chunk footers in background...")
+        for i in range(7):
+            try:
+                url = f"{HF_INDEX_BASE}/idx_phone.{i}.parquet"
+                cur.execute(f"SELECT phoneNumber FROM read_parquet('{url}') LIMIT 1").fetchall()
+            except Exception as e:
+                print(f"Warmup chunk {i} notice: {e}")
+        print("🚀 Parquet chunk footers fully warmed in memory!")
+    except Exception as e:
+        print(f"Warmup notice: {e}")
+
+def start_background_warmup():
+    """Start warmup in a detached daemon thread so bot startup is never blocked."""
+    t = threading.Thread(target=warmup_cache, name="duck-warmup", daemon=True)
+    t.start()
+
 # ── Dedup & Connected Records ───────────────────────────────────────────────
 def _person_key(row: dict) -> tuple:
     ph = (row.get("phoneNumber") or "").strip()
