@@ -1,4 +1,5 @@
 import os
+import re
 import threading
 from concurrent.futures import ThreadPoolExecutor
 import duckdb
@@ -114,10 +115,43 @@ def start_background_warmup():
     t = threading.Thread(target=warmup_cache, name="duck-warmup", daemon=True)
     t.start()
 
-# ── Dedup & Connected Records ───────────────────────────────────────────────
+# ── Dedup, Sanitization & Connected Records ───────────────────────────────────
+def is_invalid_val(val) -> bool:
+    if val is None:
+        return True
+    s = str(val).strip()
+    return not s or s.upper() in (
+        "NA", "N/A", "NONE", "NULL", "0", "UNDEFINED", "N.A", "N.A.", "UNKNOWN", "NOT AVAILABLE"
+    )
+
+def clean_address(raw_addr: str) -> str:
+    if is_invalid_val(raw_addr):
+        return ""
+    parts = [p.strip() for p in re.split(r'[!|]', str(raw_addr)) if p.strip()]
+    cleaned_parts = []
+    seen = set()
+    for part in parts:
+        part_clean = part.strip()
+        if is_invalid_val(part_clean):
+            continue
+        norm = part_clean.lower()
+        if norm in seen:
+            continue
+        seen.add(norm)
+        cleaned_parts.append(part_clean)
+        
+    if not cleaned_parts:
+        return ""
+    if len(cleaned_parts) > 1 and re.match(r'^\d{6}$', cleaned_parts[-1]):
+        pincode = cleaned_parts.pop()
+        return ", ".join(cleaned_parts) + f" - {pincode}"
+    return ", ".join(cleaned_parts)
+
 def _person_key(row: dict) -> tuple:
     ph = (row.get("phoneNumber") or "").strip()
     ad = (row.get("aadharNumber") or "").strip()
+    if is_invalid_val(ad):
+        ad = ""
     if ph or ad:
         return (ph, ad)
     return (row.get("name") or "").strip(), (row.get("fathersName") or "").strip()
@@ -126,24 +160,51 @@ def _connected_numbers(row: dict) -> list[dict]:
     connected, seen = [], set()
     for field in NUMBER_FIELDS:
         raw = row.get(field)
-        if raw is None:
+        if is_invalid_val(raw):
             continue
         value = str(raw).strip()
-        if not value or value in seen:
+        digits = "".join(c for c in value if c.isdigit())
+        clean_num = digits[-10:] if len(digits) >= 10 else digits
+        if not clean_num or len(clean_num) < 10 or clean_num in seen:
             continue
-        seen.add(value)
-        connected.append({"field": field, "value": value})
+        seen.add(clean_num)
+        connected.append({"field": field, "value": clean_num})
     return connected
 
 def _cap_duplicates(rows: list[dict]) -> list[dict]:
+    # 1. First coalesce/merge rows belonging to the same phone so valid Aadhaar/otherNumber isn't lost
+    by_phone: dict[str, dict] = {}
+    other_rows: list[dict] = []
+    
+    for r in rows:
+        ph_raw = str(r.get("phoneNumber") or "").strip()
+        ph_digits = "".join(c for c in ph_raw if c.isdigit())
+        ph_10 = ph_digits[-10:] if len(ph_digits) >= 10 else ""
+        
+        if ph_10:
+            if ph_10 not in by_phone:
+                by_phone[ph_10] = dict(r)
+            else:
+                existing = by_phone[ph_10]
+                for k, v in r.items():
+                    if k == "connected_numbers":
+                        continue
+                    if is_invalid_val(existing.get(k)) and not is_invalid_val(v):
+                        existing[k] = v
+                    elif k == "address" and not is_invalid_val(v):
+                        if len(str(v)) > len(str(existing.get(k) or "")):
+                            existing[k] = v
+        else:
+            other_rows.append(dict(r))
+            
+    merged_rows = list(by_phone.values()) + other_rows
     seen: dict[tuple, int] = {}
     out = []
-    for r in rows:
-        k = _person_key(r)
+    for record in merged_rows:
+        k = _person_key(record)
         n = seen.get(k, 0)
         if n < DUPLICATE_CAP:
             seen[k] = n + 1
-            record = dict(r)
             record["connected_numbers"] = _connected_numbers(record)
             out.append(record)
     return out
@@ -333,8 +394,7 @@ def _run_inddata_search(field: str, value: str, limit: int = 10) -> list[dict]:
                 "source": "Inddata Email Vault (104M)"
             })
         return mapped_results
-    except Exception as e:
-        print(f"Inddata search error: {e}")
+    except Exception:
         return []
 
 # ── High-Speed In-Memory Search Cache (TTL: 2 Hours) ────────────────────────
@@ -502,8 +562,7 @@ def run_sync_search(search_type: str, query: str, limit: int = 10) -> dict:
             rows = cur.execute(sql).fetchall()
             cols = [d[0] for d in cur.description]
             db_results = [dict(zip(cols, r)) for r in rows]
-        except Exception as e:
-            print(f"Username DB correlation error: {e}")
+        except Exception:
             db_results = []
 
         if db_results and db_results[0].get("mobile"):
@@ -584,22 +643,35 @@ def format_result(row: dict) -> str:
         if field.lower() in ["source", "src"]:
             continue  # Never expose internal database or dataset names to users
         val = row.get(field, "")
-        if val:
-            safe_val = html.escape(str(val).strip())
-            if not safe_val:
+        if is_invalid_val(val):
+            continue
+            
+        if field == "address":
+            val = clean_address(val)
+            if not val:
                 continue
-            emoji = FIELD_EMOJIS.get(field, "🔹")
-            label = FIELD_LABELS.get(field, field.capitalize())
-            # Avoid duplicate rows with same label (e.g. name vs Name, phoneNumber vs Number)
-            norm_label = label.strip().lower()
-            if norm_label in seen_labels:
-                continue
-            seen_labels.add(norm_label)
-            lines.append(f"{emoji} <b>{label}:</b> {safe_val}")
+                
+        safe_val = html.escape(str(val).strip())
+        emoji = FIELD_EMOJIS.get(field, "🔹")
+        label = FIELD_LABELS.get(field, field.capitalize())
+        # Avoid duplicate rows with same label (e.g. name vs Name, phoneNumber vs Number)
+        norm_label = label.strip().lower()
+        if norm_label in seen_labels:
+            continue
+        seen_labels.add(norm_label)
+        lines.append(f"{emoji} <b>{label}:</b> {safe_val}")
     
     cn = row.get("connected_numbers", [])
-    if cn:
-        nums = ", ".join(f"<code>{html.escape(str(c['value']))}</code>" for c in cn)
-        lines.append(f"🔗 <b>Connected Numbers:</b> {nums}")
+    valid_nums = []
+    for c in cn:
+        v = c.get("value")
+        if not is_invalid_val(v):
+            digits = "".join(ch for ch in str(v) if ch.isdigit())
+            if len(digits) >= 10:
+                valid_nums.append(digits[-10:])
+    if valid_nums:
+        unique_nums = list(dict.fromkeys(valid_nums))
+        num_str = ", ".join(f"<code>{html.escape(n)}</code>" for n in unique_nums)
+        lines.append(f"🔗 <b>Connected Numbers:</b> {num_str}")
         
     return "\n".join(lines)
