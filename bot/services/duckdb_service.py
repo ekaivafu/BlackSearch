@@ -184,22 +184,27 @@ def extract_pincode(addr: str) -> str:
 def extract_house_number(addr: str) -> str:
     if not addr or is_invalid_val(addr):
         return ""
-    parts = [p.strip() for p in str(addr).split('!') if p.strip()]
-    for p in parts[:3]:
-        if re.match(r'^(?:h(?:no|ouse)?\.?\s*)?([a-z0-9\-\/]+)$', p, re.I) and not re.match(r'^\d{6}$', p):
-            digits = re.findall(r'\d+', p)
-            if digits and int(digits[0]) < 10000:
-                return p.upper()
-    m = re.search(r'\b(?:h(?:no|ouse)?\.?\s*|flat\.?\s*|plot\.?\s*|#\s*)([a-z0-9\-\/]+)\b', str(addr), re.I)
-    if m:
-        return m.group(1).upper()
+    m = re.search(r'\b(?:house|hno|h|flat|plot|#)\.?\s*(?:no\.?)?\s*([a-z0-9\-\/]*\d+[a-z0-9\-\/]*)', str(addr), re.I)
+    if m and m.group(1):
+        val = m.group(1).strip().upper().strip('.-/ ')
+        val = re.sub(r'^(?:HNO|H|NO)[\.\-\s]*', '', val)
+        if re.search(r'\d', val):
+            return val
+    parts = [p.strip() for p in re.split(r'[!,]', str(addr)) if p.strip()]
+    for p in parts[:2]:
+        m2 = re.match(r'^(?:(?:house|hno|h|flat|plot)\.?\s*(?:no\.?)?\s*)?([a-z0-9\-\/]*\d+[a-z0-9\-\/]*)$', p, re.I)
+        if m2:
+            val = m2.group(1).strip().upper().strip('.-/ ')
+            val = re.sub(r'^(?:HNO|H|NO)[\.\-\s]*', '', val)
+            if re.search(r'\d', val) and not re.match(r'^\d{6}$', val):
+                return val
     return ""
 
 GENERIC_ADDRESS_WORDS = {
     "colony", "vihar", "nagar", "road", "gali", "street", "block", "sector", "phase",
     "enclave", "extension", "pur", "puri", "bazar", "bazaar", "delhi", "haryana", "uttar",
     "pradesh", "ghaziabad", "yamunanagar", "yamuna", "near", "opposite", "behind",
-    "dist", "district", "city", "state", "post", "office", "so", "do", "wo", "hno", "house"
+    "dist", "district", "city", "state", "post", "office", "so", "do", "wo", "hno", "house", "no"
 }
 
 def match_address_affinity(addr1: str, addr2: str) -> dict:
@@ -228,7 +233,7 @@ def match_address_affinity(addr1: str, addr2: str) -> dict:
     spec_inter = specific_t1.intersection(specific_t2)
 
     same_pin = bool(pin1 and pin2 and pin1 == pin2)
-    same_hno = bool(hno1 and hno2 and (hno1 == hno2 or (hno1 in hno2 or hno2 in hno1)))
+    same_hno = bool(hno1 and hno2 and hno1 == hno2)
 
     if same_hno and (same_pin or bool(spec_inter)):
         colony_str = f" in {next(iter(spec_inter)).title()}" if spec_inter else ""
