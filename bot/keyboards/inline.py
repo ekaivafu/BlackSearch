@@ -98,9 +98,17 @@ def get_plan_delete_confirm_keyboard(plan_id: int) -> InlineKeyboardMarkup:
 
 def get_search_type_keyboard() -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
-    builder.button(text="📱 Phone Number", callback_data="search_type_phone")
-    builder.button(text="🪪 Aadhaar", callback_data="search_type_aadhar")
-    builder.adjust(2)
+    builder.button(text="📱 Number Info", callback_data="search_type_phone")
+    builder.button(text="🪪 Aadhaar Info", callback_data="search_type_aadhar")
+    builder.button(text="🔬 Deep Num Search (Beta)", callback_data="search_type_phone_deep")
+    builder.adjust(2, 1)
+    return builder.as_markup()
+
+def get_deep_search_agreement_keyboard() -> InlineKeyboardMarkup:
+    builder = InlineKeyboardBuilder()
+    builder.button(text="✅ I Agree & Proceed (3 Credits)", callback_data="deep_agree")
+    builder.button(text="❌ Disagree / Cancel", callback_data="deep_cancel")
+    builder.adjust(1, 1)
     return builder.as_markup()
 
 def get_phone_search_mode_keyboard() -> InlineKeyboardMarkup:

@@ -14,7 +14,8 @@ from bot.keyboards.inline import (
     get_recharge_request_keyboard,
     get_recharge_amounts_keyboard,
     get_search_type_keyboard,
-    get_phone_search_mode_keyboard
+    get_phone_search_mode_keyboard,
+    get_deep_search_agreement_keyboard
 )
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 from bot.keyboards.reply import get_main_keyboard
@@ -77,6 +78,7 @@ def build_welcome_text(user: User, is_admin: bool) -> str:
         "🚀 <b>Core Reconnaissance Modules:</b>\n"
         "• 📱 <b>Number Info</b> — Telecom operator, owner identity & leaked records\n"
         "• 🪪 <b>Aadhar Info</b> — Citizen demographics & linked registries\n"
+        "• 🔬 <b>Deep Num Search (Beta)</b> — Aadhaar SIM pivot, family & household tracing\n"
         "• 📧 <b>Email Info</b> — Breach intelligence & 120+ social account scan\n"
         "• 👤 <b>Username Info</b> — Global footprint scanner across 400+ platforms\n\n"
         "👇 <i>Select an option from the menu below to begin:</i>"
@@ -392,7 +394,7 @@ async def cmd_search(message: Message, session: AsyncSession):
         parse_mode="HTML"
     )
 
-def build_phone_mode_text(user: User, is_admin: bool) -> str:
+def build_deep_agreement_text(user: User, is_admin: bool) -> str:
     if is_admin:
         credits_display = "♾️ Unlimited 👑"
     elif user.has_active_subscription:
@@ -409,40 +411,214 @@ def build_phone_mode_text(user: User, is_admin: bool) -> str:
         credits_display = " | ".join(parts) if parts else str(effective_credits)
 
     return (
-        "📱 <b>PHONE NUMBER RECONNAISSANCE</b>\n"
+        "🔬 <b>DEEP INTELLIGENCE RECONNAISSANCE [BETA]</b>\n"
         "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-        "Select your investigation depth mode below:\n\n"
-        "⚡ <b>Normal Search (Cost: 1 Credit)</b>\n"
-        "• <b>Scope:</b> Fast telecom & identity registry lookup.\n"
-        "• <b>Intelligence:</b> Full legal name, Father's name, registered address, operator, circle, Aadhaar number, and alternate contact.\n"
-        "• <b>Speed:</b> ~1.2 seconds.\n\n"
-        "🔬 <b>Deep Search (Cost: 3 Credits) [BETA]</b>\n"
-        "• <b>Scope:</b> Multi-hop relational OSINT intelligence dossier.\n"
-        "• <b>Pivots Executed:</b>\n"
-        "  ├ 🪪 <b>Aadhaar Reverse Pivot:</b> Uncovers <b>all other SIMs</b> registered under this citizen's Aadhaar.\n"
-        "  ├ 👨‍👩‍👧‍👦 <b>Family & Household:</b> Identifies siblings & co-habitants via parental lineage.\n"
-        "  ├ 📞 <b>Connected Contacts:</b> Cross-references alternate contacts & registered owners.\n"
-        "  └ 🛡️ <b>Digital Footprint:</b> Scans breach archives & public profiles if email is linked.\n"
-        "• <b>Speed:</b> ~20-30 seconds.\n"
-        "⚠️ <i><b>Beta Notice:</b> Deep Search is currently in <b>BETA phase</b> and still being actively optimized. We are not responsible for inaccurate or mismatched results.</i>\n\n"
-        f"💰 <b>Your Balance:</b> <b>{credits_display}</b>\n"
+        "💰 <b>Investigation Cost:</b> <b>3 Credits</b>\n"
+        "⏱️ <b>Estimated Duration:</b> ~15–30 seconds\n"
+        f"📊 <b>Your Balance:</b> <b>{credits_display}</b>\n\n"
+        "🔍 <b>Reconnaissance Scope:</b>\n"
+        "├ 🪪 <b>Aadhaar Multi-SIM Reverse Pivot:</b> Uncovers all SIMs registered under citizen's Aadhaar.\n"
+        "├ 👨‍👩‍👧‍👦 <b>Family & Lineage Intelligence:</b> Traces parental lineage, siblings, and verified co-habitants.\n"
+        "├ 📞 <b>KYC Nominee Cross-Reference:</b> Reverse-resolves alternate contacts on telecom applications.\n"
+        "└ 🛡️ <b>Digital Footprint & Breaches:</b> Deep archive & online exposure scan.\n\n"
+        "⚠️ <b>DISCLAIMER & TERMS OF USAGE (BETA):</b>\n"
+        "• <i>This module is in active <b>BETA testing</b> and algorithmic correlation is continuously being tuned.</i>\n"
+        "• <i>Data is retrieved and linked dynamically from available telecom and citizen registries.</i>\n"
+        "• <i><b>By tapping Agree below, you acknowledge and accept that we are NOT liable for any mismatched associations, incorrect linkages, or registry errors.</b></i>\n"
         "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-        "👇 <i>Choose investigation depth to begin:</i>"
+        "👇 <i>Do you accept the terms and agree to deduct 3 credits upon search?</i>"
     )
 
 @router.message(F.text == "📱 Number Info")
 async def btn_search_phone(message: Message, session: AsyncSession, state: FSMContext):
+    """Direct Normal Phone Search (1 Credit)."""
     user_service = UserService(session)
     user = await user_service.get_user_by_telegram_id(message.from_user.id)
     if not user or user.status != UserStatus.APPROVED:
         return await message.answer("❌ <b>You are not authorized.</b>", parse_mode="HTML")
     
     is_admin = message.from_user.id in config.admin_ids
-    text = build_phone_mode_text(user, is_admin)
-    await message.answer(text, reply_markup=get_phone_search_mode_keyboard(), parse_mode="HTML")
+    has_sub = user.has_active_subscription
+    await user_service.check_and_apply_daily_bonus(user)
+    effective_credits = UserService.get_effective_credits(user)
+
+    if not is_admin and not has_sub and effective_credits < 1:
+        return await message.answer(
+            "⚠️ <b>Search Quota Exhausted!</b>\n\n"
+            "Normal Search requires <b>1 credit</b>, but your balance is <b>0</b>.\n"
+            "Please request a recharge or return tomorrow for daily bonus credits.",
+            reply_markup=get_recharge_request_keyboard(),
+            parse_mode="HTML"
+        )
+        
+    await state.set_state(SearchStates.waiting_for_phone)
+    await state.update_data(search_mode="normal")
+
+    if is_admin:
+        credits_display = "♾️ Unlimited 👑"
+    elif user.has_active_subscription:
+        rem = user.subscription_remaining_time
+        days, hours = rem if rem else (0, 0)
+        credits_display = f"♾️ Unlimited ({days}d {hours}h left)"
+    else:
+        credits_display = f"{effective_credits} credit(s)"
+
+    prompt_text = (
+        "📱 <b>Phone Number Reconnaissance (Normal Search)</b>\n"
+        "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"💰 <b>Cost:</b> 1 Credit  |  <b>Balance:</b> <b>{credits_display}</b>\n\n"
+        "Enter the <b>10-digit Phone Number</b> to investigate:\n\n"
+        "👉 <i>Format: <code>9876543210</code> (no +91, no spaces)</i>\n"
+        "<i>Send /cancel to abort.</i>"
+    )
+    await message.answer(prompt_text, parse_mode="HTML")
+
+@router.message(F.text.in_({"🔬 Deep Num Search (Beta)", "🔬 Deep Num Search (BETA)", "Deep Num Search (Beta)", "🔬 Deep Search (Beta)"}))
+async def btn_search_phone_deep(message: Message, session: AsyncSession, state: FSMContext):
+    """Deep Phone Search button clicked -> triggers Disclaimer Agreement Modal (3 Credits)."""
+    user_service = UserService(session)
+    user = await user_service.get_user_by_telegram_id(message.from_user.id)
+    if not user or user.status != UserStatus.APPROVED:
+        return await message.answer("❌ <b>You are not authorized.</b>", parse_mode="HTML")
+    
+    is_admin = message.from_user.id in config.admin_ids
+    has_sub = user.has_active_subscription
+    await user_service.check_and_apply_daily_bonus(user)
+    effective_credits = UserService.get_effective_credits(user)
+
+    if not is_admin and not has_sub and effective_credits < 3:
+        if effective_credits >= 1:
+            builder = InlineKeyboardBuilder()
+            builder.button(text="⚡ Switch to Normal Search (1 Credit)", callback_data="phone_mode:normal")
+            builder.button(text="💳 Request Recharge", callback_data="request_recharge")
+            builder.adjust(1)
+            return await message.answer(
+                f"⚠️ <b>Insufficient Credits for Deep Search!</b>\n\n"
+                f"Deep Search requires <b>3 credits</b>, but your available balance is <b>{effective_credits} credit(s)</b>.\n\n"
+                f"You can run a <b>Normal Search (1 credit)</b> or recharge credits below:",
+                reply_markup=builder.as_markup(),
+                parse_mode="HTML"
+            )
+        else:
+            return await message.answer(
+                "⚠️ <b>Search Quota Exhausted!</b>\n\n"
+                "Deep Search requires <b>3 credits</b>, but your balance is <b>0</b>.\n"
+                "Please request a recharge or return tomorrow for daily bonus credits.",
+                reply_markup=get_recharge_request_keyboard(),
+                parse_mode="HTML"
+            )
+
+    text = build_deep_agreement_text(user, is_admin)
+    await message.answer(text, reply_markup=get_deep_search_agreement_keyboard(), parse_mode="HTML")
+
+@router.callback_query(F.data == "deep_agree")
+async def cb_deep_agree(callback: CallbackQuery, session: AsyncSession, state: FSMContext):
+    """User agreed to Beta disclaimer and 3 credit charge -> move to number input."""
+    user_service = UserService(session)
+    user = await user_service.get_user_by_telegram_id(callback.from_user.id)
+    if not user or user.status != UserStatus.APPROVED:
+        return await callback.answer("Unauthorized.", show_alert=True)
+        
+    is_admin = callback.from_user.id in config.admin_ids
+    has_sub = user.has_active_subscription
+    await user_service.check_and_apply_daily_bonus(user)
+    effective_credits = UserService.get_effective_credits(user)
+
+    if not is_admin and not has_sub and effective_credits < 3:
+        return await callback.answer("Insufficient credits (3 required).", show_alert=True)
+
+    await state.set_state(SearchStates.waiting_for_phone)
+    await state.update_data(search_mode="deep")
+
+    prompt_text = (
+        "🔬 <b>Deep Phone Reconnaissance [BETA]</b>\n"
+        "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        "💰 <b>Cost:</b> 3 Credits  |  <b>Status:</b> Agreement Accepted ✅\n\n"
+        "Enter the <b>10-digit Phone Number</b> to investigate:\n\n"
+        "👉 <i>Format: <code>9876543210</code> (no +91, no spaces)</i>\n"
+        "<i>Send /cancel to abort.</i>"
+    )
+    try:
+        await callback.message.edit_text(prompt_text, parse_mode="HTML")
+    except Exception:
+        await callback.message.answer(prompt_text, parse_mode="HTML")
+    await callback.answer("Agreement accepted! Enter phone number.")
+
+@router.callback_query(F.data == "deep_cancel")
+async def cb_deep_cancel(callback: CallbackQuery, state: FSMContext):
+    """User declined disclaimer -> cancel gracefully."""
+    await state.clear()
+    cancel_text = (
+        "❌ <b>Deep Search Cancelled</b>\n\n"
+        "You declined the Beta terms and disclaimer. No credits were deducted.\n"
+        "<i>You can use normal 📱 Number Info or request Deep Search again anytime.</i>"
+    )
+    try:
+        await callback.message.edit_text(cancel_text, parse_mode="HTML")
+    except Exception:
+        await callback.message.answer(cancel_text, parse_mode="HTML")
+    await callback.answer("Cancelled.")
+
+@router.callback_query(F.data == "search_type_phone_deep")
+async def cb_search_type_phone_deep(callback: CallbackQuery, session: AsyncSession, state: FSMContext):
+    """Deep phone search triggered via /search inline menu."""
+    user_service = UserService(session)
+    user = await user_service.get_user_by_telegram_id(callback.from_user.id)
+    if not user or user.status != UserStatus.APPROVED:
+        return await callback.answer("Unauthorized.", show_alert=True)
+    is_admin = callback.from_user.id in config.admin_ids
+    text = build_deep_agreement_text(user, is_admin)
+    try:
+        await callback.message.edit_text(text, reply_markup=get_deep_search_agreement_keyboard(), parse_mode="HTML")
+    except Exception:
+        await callback.message.answer(text, reply_markup=get_deep_search_agreement_keyboard(), parse_mode="HTML")
+    await callback.answer()
+
+@router.callback_query(F.data == "search_type_phone")
+async def cb_search_type_phone(callback: CallbackQuery, session: AsyncSession, state: FSMContext):
+    """Normal phone search triggered via /search inline menu."""
+    user_service = UserService(session)
+    user = await user_service.get_user_by_telegram_id(callback.from_user.id)
+    if not user or user.status != UserStatus.APPROVED:
+        return await callback.answer("Unauthorized.", show_alert=True)
+        
+    is_admin = callback.from_user.id in config.admin_ids
+    has_sub = user.has_active_subscription
+    await user_service.check_and_apply_daily_bonus(user)
+    effective_credits = UserService.get_effective_credits(user)
+
+    if not is_admin and not has_sub and effective_credits < 1:
+        return await callback.answer("Insufficient credits (1 required).", show_alert=True)
+
+    await state.set_state(SearchStates.waiting_for_phone)
+    await state.update_data(search_mode="normal")
+
+    if is_admin:
+        credits_display = "♾️ Unlimited 👑"
+    elif user.has_active_subscription:
+        rem = user.subscription_remaining_time
+        days, hours = rem if rem else (0, 0)
+        credits_display = f"♾️ Unlimited ({days}d {hours}h left)"
+    else:
+        credits_display = f"{effective_credits} credit(s)"
+
+    prompt_text = (
+        "📱 <b>Phone Number Reconnaissance (Normal Search)</b>\n"
+        "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"💰 <b>Cost:</b> 1 Credit  |  <b>Balance:</b> <b>{credits_display}</b>\n\n"
+        "Enter the <b>10-digit Phone Number</b> to investigate:\n\n"
+        "👉 <i>Format: <code>9876543210</code> (no +91, no spaces)</i>\n"
+        "<i>Send /cancel to abort.</i>"
+    )
+    try:
+        await callback.message.edit_text(prompt_text, parse_mode="HTML")
+    except Exception:
+        await callback.message.answer(prompt_text, parse_mode="HTML")
+    await callback.answer()
 
 @router.callback_query(F.data.startswith("phone_mode:"))
 async def cb_select_phone_mode(callback: CallbackQuery, session: AsyncSession, state: FSMContext):
+    """Fallback handler for any legacy phone mode callbacks."""
     mode = callback.data.split(":")[1]
 
     if mode == "cancel":
@@ -489,44 +665,29 @@ async def cb_select_phone_mode(callback: CallbackQuery, session: AsyncSession, s
             )
             return await callback.answer()
 
-    await state.set_state(SearchStates.waiting_for_phone)
-    await state.update_data(search_mode=mode)
+    if mode == "deep":
+        text = build_deep_agreement_text(user, is_admin)
+        try:
+            await callback.message.edit_text(text, reply_markup=get_deep_search_agreement_keyboard(), parse_mode="HTML")
+        except Exception:
+            await callback.message.answer(text, reply_markup=get_deep_search_agreement_keyboard(), parse_mode="HTML")
+        return await callback.answer()
 
-    mode_title = "🔬 Deep Search [BETA]" if mode == "deep" else "⚡ Normal Search"
-    cost_text = "3 Credits" if mode == "deep" else "1 Credit"
-    extra_note = (
-        "\n⚠️ <i><b>Beta Note:</b> Deep Search is in <b>BETA phase</b> and still being optimized. We are not responsible for wrong or mismatched results.</i>\n"
-        if mode == "deep" else ""
-    )
+    await state.set_state(SearchStates.waiting_for_phone)
+    await state.update_data(search_mode="normal")
 
     prompt_text = (
-        f"📱 <b>{mode_title} Active</b> (Cost: <b>{cost_text}</b>)\n"
+        "📱 <b>Normal Search Active</b> (Cost: <b>1 Credit</b>)\n"
         "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
         "Enter the <b>10-digit Phone Number</b> to investigate:\n\n"
-        "👉 <i>Format: <code>9876543210</code> (no +91, no spaces)</i>"
-        f"{extra_note}\n"
+        "👉 <i>Format: <code>9876543210</code> (no +91, no spaces)</i>\n"
         "<i>Send /cancel to abort.</i>"
     )
-
     try:
         await callback.message.edit_text(prompt_text, parse_mode="HTML")
     except Exception:
         await callback.message.answer(prompt_text, parse_mode="HTML")
 
-    await callback.answer()
-
-@router.callback_query(F.data == "search_type_phone")
-async def cb_search_type_phone(callback: CallbackQuery, session: AsyncSession, state: FSMContext):
-    user_service = UserService(session)
-    user = await user_service.get_user_by_telegram_id(callback.from_user.id)
-    if not user or user.status != UserStatus.APPROVED:
-        return await callback.answer("Unauthorized.", show_alert=True)
-    is_admin = callback.from_user.id in config.admin_ids
-    text = build_phone_mode_text(user, is_admin)
-    try:
-        await callback.message.edit_text(text, reply_markup=get_phone_search_mode_keyboard(), parse_mode="HTML")
-    except Exception:
-        await callback.message.answer(text, reply_markup=get_phone_search_mode_keyboard(), parse_mode="HTML")
     await callback.answer()
 
 @router.callback_query(F.data == "search_type_aadhar")
@@ -607,20 +768,24 @@ async def btn_how_to_use(message: Message):
     text = (
         "🕵️‍♂️ <b>BLACKSEARCH OSINT FIELD GUIDE</b>\n"
         "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-        "Master the 4 powerful search modules at your disposal:\n\n"
-        "📱 <b>1. Number Lookup</b>\n"
+        "Master the 5 powerful search modules at your disposal:\n\n"
+        "📱 <b>1. Number Lookup (1 Credit)</b>\n"
         "• <b>What it does:</b> Cross-references telecom records, carrier registries, and breach archives.\n"
         "• <b>Format:</b> 10-digit number without country code or spaces.\n"
         "• <b>Example:</b> <code>9876543210</code>\n\n"
-        "🪪 <b>2. Aadhaar Lookup</b>\n"
+        "🔬 <b>2. Deep Num Search (Beta) (3 Credits)</b>\n"
+        "• <b>What it does:</b> Deep algorithmic correlation tracing linked SIMs via Aadhaar pivot, household co-habitants, and verified family lineages.\n"
+        "• <b>Format:</b> 10-digit number with disclaimer agreement confirmation.\n"
+        "• <b>Note:</b> In active beta phase — algorithmic correlation is continually being tuned.\n\n"
+        "🪪 <b>3. Aadhaar Lookup (1 Credit)</b>\n"
         "• <b>What it does:</b> Pulls deeply linked citizen identity and governmental leak datasets.\n"
         "• <b>Format:</b> 12-digit Aadhaar number.\n"
         "• <b>Example:</b> <code>123456789012</code>\n\n"
-        "📧 <b>3. Email OSINT & Social Footprint</b>\n"
+        "📧 <b>4. Email OSINT & Social Footprint (1 Credit)</b>\n"
         "• <b>What it does:</b> Searches leaks and scans 120+ platforms (Discord, Spotify, GitHub, etc.) to locate active accounts.\n"
         "• <b>Format:</b> Complete email address.\n"
         "• <b>Example:</b> <code>target@gmail.com</code>\n\n"
-        "👤 <b>4. Username Global Recon</b>\n"
+        "👤 <b>5. Username Global Recon (1 Credit)</b>\n"
         "• <b>What it does:</b> Deploys our global reconnaissance scanner across 400+ social networks and platforms worldwide.\n"
         "• <b>Format:</b> Username handle without spaces.\n"
         "• <b>Example:</b> <code>cyberrecon</code>\n\n"
@@ -716,6 +881,10 @@ async def process_search_input(message: Message, session: AsyncSession, state: F
     NAV_ACTIONS = {
         "📱 Number Info": lambda: btn_search_phone(message, session, state),
         "🪪 Aadhar Info": lambda: btn_aadhar_search(message, session, state),
+        "🔬 Deep Num Search (Beta)": lambda: btn_search_phone_deep(message, session, state),
+        "🔬 Deep Num Search (BETA)": lambda: btn_search_phone_deep(message, session, state),
+        "Deep Num Search (Beta)": lambda: btn_search_phone_deep(message, session, state),
+        "🔬 Deep Search (Beta)": lambda: btn_search_phone_deep(message, session, state),
         "📧 Email Info": lambda: btn_email_search(message, session, state),
         "👤 Username Info": lambda: btn_username_search(message, session, state),
         "📊 My Status": lambda: cmd_status(message, session),

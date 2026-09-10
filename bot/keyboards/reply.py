@@ -7,6 +7,7 @@ def get_main_keyboard(is_admin: bool = False) -> ReplyKeyboardMarkup:
     # User buttons
     builder.button(text="📱 Number Info")
     builder.button(text="🪪 Aadhar Info")
+    builder.button(text="🔬 Deep Num Search (Beta)")
     builder.button(text="📧 Email Info")
     builder.button(text="👤 Username Info")
     builder.button(text="📊 My Status")
@@ -24,10 +25,15 @@ def get_main_keyboard(is_admin: bool = False) -> ReplyKeyboardMarkup:
         builder.button(text="📢 Channels")
         builder.button(text="🚫 Blocklist")
     
-    # Adjust layout
+    # Adjust layout:
+    # Row 1: Number Info & Aadhar Info (2)
+    # Row 2: Deep Num Search (Beta) (1)
+    # Row 3: Email Info & Username Info (2)
+    # Row 4: My Status & Refer & Earn (2)
+    # Row 5+: Admin or User utility buttons (2 each)
     if is_admin:
-        builder.adjust(2, 2, 2, 2, 2, 2)
+        builder.adjust(2, 1, 2, 2, 2, 2, 2)
     else:
-        builder.adjust(2, 2, 2, 2)
+        builder.adjust(2, 1, 2, 2, 2)
         
     return builder.as_markup(resize_keyboard=True)
