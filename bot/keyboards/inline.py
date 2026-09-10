@@ -106,7 +106,7 @@ def get_search_type_keyboard() -> InlineKeyboardMarkup:
 def get_phone_search_mode_keyboard() -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
     builder.button(text="⚡ Normal Search (1 Credit)", callback_data="phone_mode:normal")
-    builder.button(text="🔬 Deep Search (3 Credits)", callback_data="phone_mode:deep")
+    builder.button(text="🔬 Deep Search (3 Credits) [BETA]", callback_data="phone_mode:deep")
     builder.button(text="❌ Cancel", callback_data="phone_mode:cancel")
     builder.adjust(1, 1, 1)
     return builder.as_markup()

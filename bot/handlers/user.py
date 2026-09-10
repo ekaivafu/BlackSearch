@@ -416,14 +416,15 @@ def build_phone_mode_text(user: User, is_admin: bool) -> str:
         "• <b>Scope:</b> Fast telecom & identity registry lookup.\n"
         "• <b>Intelligence:</b> Full legal name, Father's name, registered address, operator, circle, Aadhaar number, and alternate contact.\n"
         "• <b>Speed:</b> ~1.2 seconds.\n\n"
-        "🔬 <b>Deep Search (Cost: 3 Credits)</b>\n"
+        "🔬 <b>Deep Search (Cost: 3 Credits) [BETA]</b>\n"
         "• <b>Scope:</b> Multi-hop relational OSINT intelligence dossier.\n"
         "• <b>Pivots Executed:</b>\n"
         "  ├ 🪪 <b>Aadhaar Reverse Pivot:</b> Uncovers <b>all other SIMs</b> registered under this citizen's Aadhaar.\n"
         "  ├ 👨‍👩‍👧‍👦 <b>Family & Household:</b> Identifies siblings & co-habitants via parental lineage.\n"
         "  ├ 📞 <b>Connected Contacts:</b> Cross-references alternate contacts & registered owners.\n"
         "  └ 🛡️ <b>Digital Footprint:</b> Scans breach archives & public profiles if email is linked.\n"
-        "• <b>Speed:</b> ~2.5 seconds.\n\n"
+        "• <b>Speed:</b> ~20-30 seconds.\n"
+        "⚠️ <i><b>Beta Notice:</b> Deep Search is currently in <b>BETA phase</b> and still being actively optimized. We are not responsible for inaccurate or mismatched results.</i>\n\n"
         f"💰 <b>Your Balance:</b> <b>{credits_display}</b>\n"
         "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
         "👇 <i>Choose investigation depth to begin:</i>"
@@ -491,10 +492,10 @@ async def cb_select_phone_mode(callback: CallbackQuery, session: AsyncSession, s
     await state.set_state(SearchStates.waiting_for_phone)
     await state.update_data(search_mode=mode)
 
-    mode_title = "🔬 Deep Search" if mode == "deep" else "⚡ Normal Search"
+    mode_title = "🔬 Deep Search [BETA]" if mode == "deep" else "⚡ Normal Search"
     cost_text = "3 Credits" if mode == "deep" else "1 Credit"
     extra_note = (
-        "\n<i>The deep intelligence engine will execute multi-hop pivots across Aadhaar linked SIMs, household members, and digital archives.</i>\n"
+        "\n⚠️ <i><b>Beta Note:</b> Deep Search is in <b>BETA phase</b> and still being optimized. We are not responsible for wrong or mismatched results.</i>\n"
         if mode == "deep" else ""
     )
 
@@ -883,9 +884,10 @@ async def process_search_input(message: Message, session: AsyncSession, state: F
         coffee_msg = None
         if search_type == "phone" and search_mode == "deep":
             coffee_msg = await message.answer(
-                "☕ <b>Grab your coffee!</b> 🔬\n\n"
+                "☕ <b>Grab your coffee!</b> 🔬 [BETA]\n\n"
                 "<i>Deep Search is launching heavy multi-hop reconnaissance across 97GB+ of intelligence databases, tracing linked SIMs, household registries, and digital archives...\n"
-                "This may take a few moments!</i>",
+                "This may take a few moments!</i>\n\n"
+                "⚠️ <i><b>Note:</b> Deep Search is in <b>BETA phase</b>. We are still actively optimizing algorithms and are not responsible for any inaccuracies or wrong results.</i>",
                 parse_mode="HTML"
             )
 
@@ -894,7 +896,7 @@ async def process_search_input(message: Message, session: AsyncSession, state: F
             wait_msg = await message.answer(f"⏳ <b>You are in a queue!</b>\nPeople ahead of you: {search_queue_count - 15}\n<i>I will notify you when your search is over.</i>", parse_mode="HTML")
         else:
             if search_type == "phone" and search_mode == "deep":
-                wait_msg = await message.answer("🔬 <b>Initializing Deep Intelligence Scan...</b>\n<code>[          ]</code>", parse_mode="HTML")
+                wait_msg = await message.answer("🔬 <b>Initializing Deep Intelligence Scan [BETA]...</b>\n<code>[          ]</code>", parse_mode="HTML")
             else:
                 wait_msg = await message.answer("⏳ <b>Querying Global Database, please wait...</b>\n<code>[          ]</code>", parse_mode="HTML")
 
@@ -923,7 +925,7 @@ async def process_search_input(message: Message, session: AsyncSession, state: F
             ]
         elif search_type == "phone" and search_mode == "deep":
             animation_texts = [
-                "🔬 <b>Initializing Deep Intelligence Scan...</b>",
+                "🔬 <b>Initializing Deep Intelligence Scan [BETA]...</b>",
                 "🔄 <b>Executing Reverse Aadhaar SIM Pivot...</b>",
                 "👨‍👩‍👧‍👦 <b>Correlating Household & Family Linkages...</b>",
                 "🛡️ <b>Scanning Digital Archives & Online Footprint...</b>"
