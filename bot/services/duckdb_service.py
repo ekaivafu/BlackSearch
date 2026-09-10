@@ -492,6 +492,44 @@ def run_sync_search(search_type: str, query: str, limit: int = 10) -> dict:
         _set_cached_result(cache_key, main_data)
         return main_data
 
+    elif search_type == "username":
+        # 🚀 Correlate username against 104M Vault (e.g. john.doe@... -> mobile -> ICMR profile)
+        con = _get_conn()
+        cur = con.cursor()
+        v = str(q).replace("'", "''").lower()
+        sql = f"SELECT mobile, email, name, circle FROM my_db.ind_emails WHERE email LIKE '{v}@%' OR email LIKE '{v}.%@%' LIMIT 3"
+        try:
+            rows = cur.execute(sql).fetchall()
+            cols = [d[0] for d in cur.description]
+            db_results = [dict(zip(cols, r)) for r in rows]
+        except Exception as e:
+            print(f"Username DB correlation error: {e}")
+            db_results = []
+
+        if db_results and db_results[0].get("mobile"):
+            phone = str(db_results[0]["mobile"]).strip()
+            icmr_data = _run_field_search("phoneNumber", phone, "exact", limit)
+            if icmr_data.get("results"):
+                for r in icmr_data["results"]:
+                    r["Email"] = db_results[0].get("email")
+                    r["source"] = "104M Email Vault + ICMR Record"
+                icmr_data["count"] = len(icmr_data["results"])
+                _set_cached_result(cache_key, icmr_data)
+                return icmr_data
+
+        mapped = []
+        for r in db_results:
+            mapped.append({
+                "name": r.get("name"),
+                "phoneNumber": r.get("mobile"),
+                "state": r.get("circle"),
+                "Email": r.get("email"),
+                "source": "104M Email Vault"
+            })
+        main_data = {"field": "username", "value": q, "mode": "exact", "count": len(mapped), "results": mapped}
+        _set_cached_result(cache_key, main_data)
+        return main_data
+
     return {"count": 0, "results": []}
 
 FIELD_EMOJIS = {
