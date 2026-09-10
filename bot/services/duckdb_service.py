@@ -742,6 +742,11 @@ def run_deep_phone_search(phone: str, limit: int = 10) -> dict:
                 seen_sims.add(p)
                 linked_sims.append(r)
 
+    target_father = (target.get("fathersName") or "").strip()
+    target_addr = str(target.get("address") or "").strip()
+    target_pin_match = re.search(r'\b\d{6}\b', target_addr)
+    target_pin = target_pin_match.group(0) if target_pin_match else ""
+
     # Parse family
     family_members = []
     seen_fam = set()
@@ -755,6 +760,23 @@ def run_deep_phone_search(phone: str, limit: int = 10) -> dict:
             if k in seen_fam:
                 continue
             seen_fam.add(k)
+
+            # Determine matching criteria
+            r_father = (r.get("fathersName") or "").strip()
+            r_addr = str(r.get("address") or "").strip()
+            r_pin_match = re.search(r'\b\d{6}\b', r_addr)
+            r_pin = r_pin_match.group(0) if r_pin_match else ""
+
+            reasons = []
+            if target_father and r_father and target_father.lower() == r_father.lower():
+                reasons.append(f"Father: {target_father}")
+            elif target.get("name") and r_father and str(target.get("name")).strip().lower() == r_father.lower():
+                reasons.append(f"Parent: {target.get('name')}")
+
+            if target_pin and r_pin and target_pin == r_pin:
+                reasons.append(f"Pincode: {target_pin}")
+
+            r["match_reason"] = " & ".join(reasons) if reasons else (f"Father: {target_father}" if target_father else "Parental Lineage")
             family_members.append(r)
 
     # Parse alt contacts
@@ -840,9 +862,17 @@ def format_deep_phone_result(deep_data: dict, duration: float = 0.0, email_osint
             fam_name = fam.get("name", "Relative")
             fam_ph = fam.get("phoneNumber", "")
             fam_ad = fam.get("aadharNumber", "")
+
+            match_reason = fam.get("match_reason")
+            if not match_reason:
+                target_f = (target.get("fathersName") or "").strip()
+                match_reason = f"Father: {target_f}" if target_f and not is_invalid_val(target_f) else "Parental Lineage"
+
             fam_line = f"{prefix}👤 <b>{html.escape(str(fam_name))}</b>"
             if not is_invalid_val(fam_ph):
                 fam_line += f" — 📱 <code>{html.escape(str(fam_ph))}</code>"
+            if match_reason:
+                fam_line += f" <i>(Matches: {html.escape(str(match_reason))})</i>"
             if not is_invalid_val(fam_ad):
                 fam_line += f" | 🪪 <code>{html.escape(str(fam_ad))}</code>"
             lines.append(fam_line)
