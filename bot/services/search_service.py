@@ -215,7 +215,7 @@ class SearchService:
                 duckdb_service.run_deep_phone_search,
                 phone
             )
-            raw_res = await asyncio.wait_for(deep_future, timeout=35.0)
+            raw_res = await asyncio.wait_for(deep_future, timeout=40.0)
 
             deep_data = raw_res.get("deep_data")
             is_success = bool(raw_res.get("count", 0)) and bool(deep_data)

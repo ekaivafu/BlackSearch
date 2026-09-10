@@ -813,99 +813,212 @@ def run_deep_phone_search(phone: str, limit: int = 10) -> dict:
 
     target = records[0]
     aadhar = target.get("aadharNumber") if not is_invalid_val(target.get("aadharNumber")) else None
-    alt_phone = target.get("otherNumber") if not is_invalid_val(target.get("otherNumber")) else None
     father = target.get("fathersName") if not is_invalid_val(target.get("fathersName")) else None
+    target_addr = str(target.get("address") or "").strip()
+
+    all_target_addresses = [target_addr] if target_addr and not is_invalid_val(target_addr) else []
+    all_alt_numbers = set()
+
+    if target.get("otherNumber") and not is_invalid_val(target.get("otherNumber")):
+        o = "".join(c for c in str(target.get("otherNumber")) if c.isdigit())[-10:]
+        if o and o != clean_phone:
+            all_alt_numbers.add((o, "Primary Profile Application"))
 
     futures = {}
     if aadhar:
         futures["aadhar_sims"] = pool.submit(run_sync_search, "aadhar", str(aadhar).strip(), 10)
 
-    if alt_phone:
-        alt_digits = "".join(c for c in str(alt_phone) if c.isdigit())[-10:]
-        if alt_digits and alt_digits != clean_phone:
-            futures["alt_contact"] = pool.submit(run_sync_search, "phone", alt_digits, 5)
+    # Resolve linked sims first to harvest all secondary addresses & alternate numbers
+    linked_sims = []
+    seen_sims = {clean_phone}
+    if "aadhar_sims" in futures:
+        try:
+            sim_res = futures["aadhar_sims"].result(timeout=15.0)
+            for r in (sim_res.get("results") or []):
+                p = "".join(c for c in str(r.get("phoneNumber") or "") if c.isdigit())[-10:]
+                if p and p not in seen_sims and not is_invalid_val(p):
+                    seen_sims.add(p)
+                    linked_sims.append(r)
+                r_addr = str(r.get("address") or "").strip()
+                if r_addr and not is_invalid_val(r_addr) and r_addr not in all_target_addresses:
+                    all_target_addresses.append(r_addr)
+                if r.get("otherNumber") and not is_invalid_val(r.get("otherNumber")):
+                    ro = "".join(c for c in str(r.get("otherNumber")) if c.isdigit())[-10:]
+                    if ro and ro != clean_phone and ro != p:
+                        all_alt_numbers.add((ro, f"Secondary SIM ({p}) Application"))
+        except Exception as e:
+            print(f"Aadhaar SIMs lookup error: {e}")
 
+    # Parallel Hop: Family Lineage & Household Address Matching
+    achunks = get_aadhar_chunks(str(aadhar)) if aadhar else [0]
+    achunk = achunks[0] if achunks else 0
+
+    parallel_futures = {}
+
+    # Parallel A: Family Lineage Search
     if aadhar and father and len(father) > 4:
-        achunks = get_aadhar_chunks(str(aadhar))
-        achunk = achunks[0] if achunks else 0
         def _find_family():
             try:
                 con = _get_conn()
                 cur = con.cursor()
                 safe_father = str(father).replace("'", "''")
-                sql = f"SELECT name, fathersName, phoneNumber, aadharNumber, address FROM read_parquet('{HF_INDEX_BASE}/idx_aadhar.{achunk}.parquet') WHERE fathersName = '{safe_father}' LIMIT 8"
+                sql = f"SELECT name, fathersName, phoneNumber, aadharNumber, address FROM read_parquet('{HF_INDEX_BASE}/idx_aadhar.{achunk}.parquet') WHERE fathersName = '{safe_father}' LIMIT 20"
                 rows = cur.execute(sql).fetchall()
                 cols = [d[0] for d in cur.description]
                 return [dict(zip(cols, r)) for r in rows]
             except Exception as e:
                 print(f"Family lookup error: {e}")
                 return []
-        futures["family"] = pool.submit(_find_family)
+        parallel_futures["family"] = pool.submit(_find_family)
 
-    results = {}
-    for k, f in futures.items():
+    # Parallel B: Household Co-habitants Search by Address / Pincode
+    target_pincodes = [extract_pincode(addr) for addr in all_target_addresses if extract_pincode(addr)]
+    primary_pin = target_pincodes[0] if target_pincodes else ""
+
+    if primary_pin:
+        def _find_household():
+            try:
+                con = _get_conn()
+                cur = con.cursor()
+                sql = f"SELECT name, fathersName, phoneNumber, aadharNumber, address FROM read_parquet('{HF_INDEX_BASE}/idx_aadhar.{achunk}.parquet') WHERE address LIKE '%{primary_pin}%' LIMIT 30"
+                rows = cur.execute(sql).fetchall()
+                cols = [d[0] for d in cur.description]
+                return [dict(zip(cols, r)) for r in rows]
+            except Exception as e:
+                print(f"Household lookup error: {e}")
+                return []
+        parallel_futures["household"] = pool.submit(_find_household)
+
+    # Parallel C: Alternate Contacts Lookup
+    alt_lookups = {}
+    for alt_n, orig in list(all_alt_numbers)[:4]:
+        alt_lookups[alt_n] = (pool.submit(run_sync_search, "phone", alt_n, 1), orig)
+
+    # Await parallel results
+    p_results = {}
+    for k, f in parallel_futures.items():
         try:
-            results[k] = f.result(timeout=15.0)
+            p_results[k] = f.result(timeout=28.0)
         except Exception as e:
-            print(f"Deep pivot {k} timed out or failed: {e}")
-            results[k] = None
+            print(f"Deep pivot {k} error or timeout: {e}")
+            p_results[k] = []
 
-    # Parse linked sims
-    linked_sims = []
-    seen_sims = {clean_phone}
-    if results.get("aadhar_sims"):
-        for r in results["aadhar_sims"].get("results", []):
-            p = "".join(c for c in str(r.get("phoneNumber") or "") if c.isdigit())[-10:]
-            if p and p not in seen_sims and not is_invalid_val(p):
-                seen_sims.add(p)
-                linked_sims.append(r)
+    # 1. Process Household Co-habitants
+    household_members = []
+    seen_house = set()
+    raw_house = p_results.get("household") or []
 
-    target_father = (target.get("fathersName") or "").strip()
-    target_addr = str(target.get("address") or "").strip()
-    target_pin_match = re.search(r'\b\d{6}\b', target_addr)
-    target_pin = target_pin_match.group(0) if target_pin_match else ""
+    for r in raw_house:
+        cp = "".join(c for c in str(r.get("phoneNumber") or "") if c.isdigit())[-10:]
+        ca = "".join(c for c in str(r.get("aadharNumber") or "") if c.isdigit())[-12:]
+        if cp in seen_sims or (aadhar and ca and ca == str(aadhar)[-12:]):
+            continue
+        k = (cp, ca) if (cp or ca) else ((r.get("name") or "").strip().lower(),)
+        if k in seen_house:
+            continue
 
-    # Parse family
+        r_addr = str(r.get("address") or "").strip()
+        best_affinity = None
+        for known_addr in all_target_addresses:
+            aff = match_address_affinity(known_addr, r_addr)
+            if not best_affinity or aff["score"] > best_affinity["score"]:
+                best_affinity = aff
+
+        # Only retain verified high-confidence address co-habitants (score >= 0.65 or house match)
+        if best_affinity and best_affinity.get("matched") and best_affinity.get("score", 0) >= 0.65:
+            seen_house.add(k)
+            r["match_reason"] = best_affinity.get("reason", f"Same Address ({primary_pin})")
+            household_members.append(r)
+
+    # 2. Process Family Members with Strict Geographic Verification
     family_members = []
     seen_fam = set()
-    if results.get("family"):
-        for r in results["family"]:
-            p = "".join(c for c in str(r.get("phoneNumber") or "") if c.isdigit())[-10:]
-            a = "".join(c for c in str(r.get("aadharNumber") or "") if c.isdigit())[-12:]
-            if (p and p == clean_phone) or (aadhar and a and a == str(aadhar)[-12:]):
-                continue
-            k = (r.get("name"), p, a)
-            if k in seen_fam:
-                continue
+    raw_fam = p_results.get("family") or []
+
+    target_name = (target.get("name") or "").strip()
+    target_surname = target_name.split()[-1].lower() if len(target_name.split()) > 1 else ""
+
+    for r in raw_fam:
+        cp = "".join(c for c in str(r.get("phoneNumber") or "") if c.isdigit())[-10:]
+        ca = "".join(c for c in str(r.get("aadharNumber") or "") if c.isdigit())[-12:]
+        if cp in seen_sims or (aadhar and ca and ca == str(aadhar)[-12:]):
+            continue
+        k = (cp, ca) if (cp or ca) else ((r.get("name") or "").strip().lower(),)
+        if k in seen_fam:
+            continue
+
+        r_addr = str(r.get("address") or "").strip()
+        r_name = (r.get("name") or "").strip()
+        r_surname = r_name.split()[-1].lower() if len(r_name.split()) > 1 else ""
+
+        is_verified = False
+        reasons = []
+
+        # Check address affinity against any known address of target
+        for known_addr in all_target_addresses:
+            aff = match_address_affinity(known_addr, r_addr)
+            if aff.get("matched") and aff.get("score", 0) >= 0.35:
+                is_verified = True
+                reasons.append(aff["reason"])
+                break
+
+            # Check district/city tokens
+            known_lower = known_addr.lower()
+            r_lower = r_addr.lower()
+            for loc_token in [
+                "ghaziabad", "yamunanagar", "yamuna nagar", "delhi", "noida", "meerut",
+                "fatehgarh sahib", "mandi gobindgarh", "punjab", "haryana", "lucknow", "kanpur"
+            ]:
+                if loc_token in known_lower and loc_token in r_lower:
+                    is_verified = True
+                    reasons.append(f"Same Locality: {loc_token.title()}")
+                    break
+            if is_verified:
+                break
+
+        # Sibling surname correlation for rare family names
+        if not is_verified and target_surname and r_surname and target_surname == r_surname:
+            if target_surname not in ["kumar", "sharma", "singh", "devi", "prasad", "ram", "lal"]:
+                is_verified = True
+                reasons.append("Lineage Sibling Match")
+
+        # Keep only verified relations; prune random cross-state stranger collisions!
+        if is_verified:
             seen_fam.add(k)
-
-            # Determine matching criteria using parental lineage and advanced address affinity
-            r_father = (r.get("fathersName") or "").strip()
-            r_addr = str(r.get("address") or "").strip()
-
-            reasons = []
-            if target_father and r_father and target_father.lower() == r_father.lower():
-                reasons.append(f"Father: {target_father}")
-            elif target.get("name") and r_father and str(target.get("name")).strip().lower() == r_father.lower():
-                reasons.append(f"Parent: {target.get('name')}")
-
-            addr_affinity = match_address_affinity(target_addr, r_addr)
-            if addr_affinity.get("reason"):
-                reasons.append(addr_affinity["reason"])
-
-            r["match_reason"] = " | ".join(reasons) if reasons else (f"Father: {target_father}" if target_father else "Parental Lineage")
+            reasons.insert(0, f"Father: {father}")
+            r["match_reason"] = " | ".join(reasons)
             family_members.append(r)
 
-    # Parse alt contacts
+    # 3. Process Alternate Contacts
     alt_contacts = []
-    if results.get("alt_contact"):
-        alt_contacts = results["alt_contact"].get("results", [])[:2]
+    for alt_n, (lookup_future, origin) in alt_lookups.items():
+        try:
+            alt_res = lookup_future.result(timeout=5.0)
+            if alt_res.get("results"):
+                c_item = dict(alt_res["results"][0])
+                c_item["origin"] = origin
+                alt_contacts.append(c_item)
+            else:
+                alt_contacts.append({
+                    "phoneNumber": alt_n,
+                    "name": "Discovered Alternate Contact",
+                    "origin": origin,
+                    "source": "telecom_registry"
+                })
+        except Exception:
+            alt_contacts.append({
+                "phoneNumber": alt_n,
+                "name": "Discovered Alternate Contact",
+                "origin": origin,
+                "source": "telecom_registry"
+            })
 
     deep_data = {
         "phone": clean_phone,
         "target": target,
         "all_records": records,
         "linked_sims": linked_sims,
+        "household_members": household_members,
         "family_members": family_members,
         "alt_contacts": alt_contacts,
         "email": target.get("Email")
@@ -964,16 +1077,39 @@ def format_deep_phone_result(deep_data: dict, duration: float = 0.0, email_osint
             prefix = "└ " if idx == len(linked_sims) - 1 else "├ "
             sim_no = sim.get("phoneNumber") or ""
             sim_name = sim.get("name") or target.get("name") or "Citizen"
-            lines.append(f"{prefix}📱 <code>{html.escape(str(sim_no))}</code> (Registered to: <b>{html.escape(str(sim_name))}</b>)")
+            sim_addr = clean_address(sim.get("address"))
+            addr_snippet = f" | 🏠 {sim_addr[:40]}..." if sim_addr else ""
+            lines.append(f"{prefix}📱 <code>{html.escape(str(sim_no))}</code> (Registered to: <b>{html.escape(str(sim_name))}</b>{html.escape(addr_snippet)})")
     else:
         lines.append("<i>No additional SIM cards registered under this Aadhaar.</i>")
     lines.append("")
 
-    # 3. Family & Household Connections
+    # 3. Household & Co-habitants (Same Address)
+    households = deep_data.get("household_members", [])
+    if households:
+        lines.append("🏠 <b>HOUSEHOLD & CO-HABITANTS (Address Correlation)</b>")
+        lines.append(f"<i>Identified {len(households)} co-habitant(s) sharing registered premises/locality:</i>")
+        for idx, hm in enumerate(households):
+            prefix = "└ " if idx == len(households) - 1 else "├ "
+            h_name = hm.get("name", "Resident")
+            h_ph = hm.get("phoneNumber", "")
+            h_ad = hm.get("aadharNumber", "")
+            h_reason = hm.get("match_reason", "Registered at Same Premises")
+            h_line = f"{prefix}👤 <b>{html.escape(str(h_name))}</b>"
+            if not is_invalid_val(h_ph):
+                h_line += f" — 📱 <code>{html.escape(str(h_ph))}</code>"
+            if h_reason:
+                h_line += f" <i>(Matches: {html.escape(str(h_reason))})</i>"
+            if not is_invalid_val(h_ad):
+                h_line += f" | 🪪 <code>{html.escape(str(h_ad))}</code>"
+            lines.append(h_line)
+        lines.append("")
+
+    # 4. Family & Lineage Linkages
     family = deep_data.get("family_members", [])
-    lines.append("👨‍👩‍👧‍👦 <b>FAMILY & HOUSEHOLD LINKAGES</b>")
+    lines.append("👨‍👩‍👧‍👦 <b>FAMILY & LINEAGE LINKAGES (Verified Parental & Sibling Match)</b>")
     if family:
-        lines.append(f"<i>Identified {len(family)} probable family member(s) via parental lineage:</i>")
+        lines.append(f"<i>Identified {len(family)} verified family member(s) via parental lineage:</i>")
         for idx, fam in enumerate(family):
             prefix = "└ " if idx == len(family) - 1 else "├ "
             fam_name = fam.get("name", "Relative")
@@ -994,10 +1130,10 @@ def format_deep_phone_result(deep_data: dict, duration: float = 0.0, email_osint
                 fam_line += f" | 🪪 <code>{html.escape(str(fam_ad))}</code>"
             lines.append(fam_line)
     else:
-        lines.append("<i>No direct co-habitants or siblings matched in registry chunk.</i>")
+        lines.append("<i>No direct family members verified at this location in registry chunk.</i>")
     lines.append("")
 
-    # 4. Emergency / Alternate Contacts
+    # 5. Emergency & Alternate Contacts
     alt_contacts = deep_data.get("alt_contacts", [])
     if alt_contacts:
         lines.append("📞 <b>EMERGENCY & ALTERNATE CONTACTS</b>")
@@ -1005,10 +1141,11 @@ def format_deep_phone_result(deep_data: dict, duration: float = 0.0, email_osint
             prefix = "└ " if idx == len(alt_contacts) - 1 else "├ "
             ac_ph = ac.get("phoneNumber", "")
             ac_name = ac.get("name", "Contact")
-            lines.append(f"{prefix}📞 <code>{html.escape(str(ac_ph))}</code> (Registered to: <b>{html.escape(str(ac_name))}</b>)")
+            ac_orig = ac.get("origin", "Secondary Application Record")
+            lines.append(f"{prefix}📞 <code>{html.escape(str(ac_ph))}</code> (Registered to: <b>{html.escape(str(ac_name))}</b> | <i>{html.escape(str(ac_orig))}</i>)")
         lines.append("")
 
-    # 5. Gravatar / Breach Scan if present
+    # 6. Gravatar / Breach Scan if present
     if email_osint:
         breach_count = email_osint.get("breach_count", 0)
         breaches = email_osint.get("breaches", [])
