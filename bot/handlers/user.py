@@ -9,7 +9,14 @@ from bot.services.user_service import UserService
 from bot.services.search_service import SearchService
 from bot.services.blacklist_service import BlacklistService
 from bot.models.models import User, UserStatus, RechargeRequest
-from bot.keyboards.inline import get_approval_keyboard, get_recharge_request_keyboard, get_recharge_amounts_keyboard, get_search_type_keyboard
+from bot.keyboards.inline import (
+    get_approval_keyboard,
+    get_recharge_request_keyboard,
+    get_recharge_amounts_keyboard,
+    get_search_type_keyboard,
+    get_phone_search_mode_keyboard
+)
+from aiogram.utils.keyboard import InlineKeyboardBuilder
 from bot.keyboards.reply import get_main_keyboard
 from bot.config import config
 from bot.middleware.daily_bonus import DAILY_BONUS_BANNER
@@ -385,6 +392,43 @@ async def cmd_search(message: Message, session: AsyncSession):
         parse_mode="HTML"
     )
 
+def build_phone_mode_text(user: User, is_admin: bool) -> str:
+    if is_admin:
+        credits_display = "♾️ Unlimited 👑"
+    elif user.has_active_subscription:
+        rem = user.subscription_remaining_time
+        days, hours = rem if rem else (0, 0)
+        credits_display = f"♾️ Unlimited ({days}d {hours}h left)"
+    else:
+        effective_credits = UserService.get_effective_credits(user)
+        parts = []
+        if user.bonus_credits > 0:
+            parts.append(f"🎁 {user.bonus_credits} daily")
+        if user.credits > 0:
+            parts.append(f"🪙 {user.credits} permanent")
+        credits_display = " | ".join(parts) if parts else str(effective_credits)
+
+    return (
+        "📱 <b>PHONE NUMBER RECONNAISSANCE</b>\n"
+        "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        "Select your investigation depth mode below:\n\n"
+        "⚡ <b>Normal Search (Cost: 1 Credit)</b>\n"
+        "• <b>Scope:</b> Fast telecom & identity registry lookup.\n"
+        "• <b>Intelligence:</b> Full legal name, Father's name, registered address, operator, circle, Aadhaar number, and alternate contact.\n"
+        "• <b>Speed:</b> ~1.2 seconds.\n\n"
+        "🔬 <b>Deep Search (Cost: 3 Credits)</b>\n"
+        "• <b>Scope:</b> Multi-hop relational OSINT intelligence dossier.\n"
+        "• <b>Pivots Executed:</b>\n"
+        "  ├ 🪪 <b>Aadhaar Reverse Pivot:</b> Uncovers <b>all other SIMs</b> registered under this citizen's Aadhaar.\n"
+        "  ├ 👨‍👩‍👧‍👦 <b>Family & Household:</b> Identifies siblings & co-habitants via parental lineage.\n"
+        "  ├ 📞 <b>Connected Contacts:</b> Cross-references alternate contacts & registered owners.\n"
+        "  └ 🛡️ <b>Digital Footprint:</b> Scans breach archives & public profiles if email is linked.\n"
+        "• <b>Speed:</b> ~2.5 seconds.\n\n"
+        f"💰 <b>Your Balance:</b> <b>{credits_display}</b>\n"
+        "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        "👇 <i>Choose investigation depth to begin:</i>"
+    )
+
 @router.message(F.text == "📱 Number Info")
 async def btn_search_phone(message: Message, session: AsyncSession, state: FSMContext):
     user_service = UserService(session)
@@ -392,15 +436,117 @@ async def btn_search_phone(message: Message, session: AsyncSession, state: FSMCo
     if not user or user.status != UserStatus.APPROVED:
         return await message.answer("❌ <b>You are not authorized.</b>", parse_mode="HTML")
     
-    await message.answer(
-        "📱 <b>Phone Number Lookup Module</b>\n"
+    is_admin = message.from_user.id in config.admin_ids
+    text = build_phone_mode_text(user, is_admin)
+    await message.answer(text, reply_markup=get_phone_search_mode_keyboard(), parse_mode="HTML")
+
+@router.callback_query(F.data.startswith("phone_mode:"))
+async def cb_select_phone_mode(callback: CallbackQuery, session: AsyncSession, state: FSMContext):
+    mode = callback.data.split(":")[1]
+
+    if mode == "cancel":
+        await state.clear()
+        try:
+            await callback.message.delete()
+        except Exception:
+            await callback.message.edit_text("❌ <b>Search cancelled.</b>", parse_mode="HTML")
+        return await callback.answer("Cancelled.")
+
+    user_service = UserService(session)
+    user = await user_service.get_user_by_telegram_id(callback.from_user.id)
+    if not user or user.status != UserStatus.APPROVED:
+        return await callback.answer("You are not authorized.", show_alert=True)
+
+    is_admin = callback.from_user.id in config.admin_ids
+    has_sub = user.has_active_subscription
+    await user_service.check_and_apply_daily_bonus(user)
+    effective_credits = UserService.get_effective_credits(user)
+
+    required_credits = 3 if mode == "deep" else 1
+
+    if not is_admin and not has_sub and effective_credits < required_credits:
+        if mode == "deep" and effective_credits >= 1:
+            builder = InlineKeyboardBuilder()
+            builder.button(text="⚡ Switch to Normal Search (1 Credit)", callback_data="phone_mode:normal")
+            builder.button(text="💳 Request Recharge", callback_data="request_recharge")
+            builder.adjust(1)
+            await callback.message.answer(
+                f"⚠️ <b>Insufficient Credits for Deep Search!</b>\n\n"
+                f"Deep Search requires <b>3 credits</b>, but your available balance is <b>{effective_credits} credit(s)</b>.\n\n"
+                f"You have enough balance to run a <b>Normal Search (1 credit)</b>, or recharge credits below:",
+                reply_markup=builder.as_markup(),
+                parse_mode="HTML"
+            )
+            return await callback.answer()
+        else:
+            await callback.message.answer(
+                f"⚠️ <b>Search Quota Exhausted!</b>\n\n"
+                f"This search requires <b>{required_credits} credit(s)</b>, but your balance is <b>{effective_credits}</b>.\n"
+                f"Please request a recharge or return tomorrow for your daily bonus credits.",
+                reply_markup=get_recharge_request_keyboard(),
+                parse_mode="HTML"
+            )
+            return await callback.answer()
+
+    await state.set_state(SearchStates.waiting_for_phone)
+    await state.update_data(search_mode=mode)
+
+    mode_title = "🔬 Deep Search" if mode == "deep" else "⚡ Normal Search"
+    cost_text = "3 Credits" if mode == "deep" else "1 Credit"
+    extra_note = (
+        "\n<i>The deep intelligence engine will execute multi-hop pivots across Aadhaar linked SIMs, household members, and digital archives.</i>\n"
+        if mode == "deep" else ""
+    )
+
+    prompt_text = (
+        f"📱 <b>{mode_title} Active</b> (Cost: <b>{cost_text}</b>)\n"
         "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
         "Enter the <b>10-digit Phone Number</b> to investigate:\n\n"
-        "👉 <i>Format: <code>9876543210</code> (no +91, no spaces)</i>\n"
-        "<i>Send /cancel to abort.</i>",
-        parse_mode="HTML"
+        "👉 <i>Format: <code>9876543210</code> (no +91, no spaces)</i>"
+        f"{extra_note}\n"
+        "<i>Send /cancel to abort.</i>"
     )
-    await state.set_state(SearchStates.waiting_for_phone)
+
+    try:
+        await callback.message.edit_text(prompt_text, parse_mode="HTML")
+    except Exception:
+        await callback.message.answer(prompt_text, parse_mode="HTML")
+
+    await callback.answer()
+
+@router.callback_query(F.data == "search_type_phone")
+async def cb_search_type_phone(callback: CallbackQuery, session: AsyncSession, state: FSMContext):
+    user_service = UserService(session)
+    user = await user_service.get_user_by_telegram_id(callback.from_user.id)
+    if not user or user.status != UserStatus.APPROVED:
+        return await callback.answer("Unauthorized.", show_alert=True)
+    is_admin = callback.from_user.id in config.admin_ids
+    text = build_phone_mode_text(user, is_admin)
+    try:
+        await callback.message.edit_text(text, reply_markup=get_phone_search_mode_keyboard(), parse_mode="HTML")
+    except Exception:
+        await callback.message.answer(text, reply_markup=get_phone_search_mode_keyboard(), parse_mode="HTML")
+    await callback.answer()
+
+@router.callback_query(F.data == "search_type_aadhar")
+async def cb_search_type_aadhar(callback: CallbackQuery, session: AsyncSession, state: FSMContext):
+    user_service = UserService(session)
+    user = await user_service.get_user_by_telegram_id(callback.from_user.id)
+    if not user or user.status != UserStatus.APPROVED:
+        return await callback.answer("Unauthorized.", show_alert=True)
+    await state.set_state(SearchStates.waiting_for_aadhar)
+    text = (
+        "🪪 <b>Aadhaar Identity Lookup Module</b>\n"
+        "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        "Enter the <b>12-digit Aadhaar Number</b> to investigate:\n\n"
+        "👉 <i>Format: <code>123456789012</code> (numbers only, no spaces)</i>\n"
+        "<i>Send /cancel to abort.</i>"
+    )
+    try:
+        await callback.message.edit_text(text, parse_mode="HTML")
+    except Exception:
+        await callback.message.answer(text, parse_mode="HTML")
+    await callback.answer()
 
 @router.message(F.text == "🪪 Aadhar Info")
 async def btn_aadhar_search(message: Message, session: AsyncSession, state: FSMContext):
@@ -661,7 +807,12 @@ async def process_search_input(message: Message, session: AsyncSession, state: F
                 parse_mode="HTML"
             )
 
+    state_data = await state.get_data()
+    search_mode = state_data.get("search_mode", "normal")
     await state.clear()
+
+    # Determine credit cost based on mode: Deep Search = 3 credits, all others = 1 credit
+    credit_cost = 3 if (search_type == "phone" and search_mode == "deep") else 1
 
     # ── Blocklist Search Interception ──
     bl_service = BlacklistService(session)
@@ -691,22 +842,38 @@ async def process_search_input(message: Message, session: AsyncSession, state: F
     if not user or user.status != UserStatus.APPROVED:
         return await message.answer("You are not authorized to perform searches.")
 
-    deducted_source = None
+    deduction_info = None
     has_sub = False
     if not is_admin:
         has_sub = user.has_active_subscription
         await user_service.check_and_apply_daily_bonus(user)
         effective_credits = UserService.get_effective_credits(user)
 
-        if effective_credits < 1 and not has_sub:
-            return await message.answer(
-                "⚠️ Your search credits are exhausted. Please request a recharge or wait for tomorrow's daily bonus.",
-                reply_markup=get_recharge_request_keyboard()
-            )
+        if effective_credits < credit_cost and not has_sub:
+            if credit_cost == 3 and effective_credits >= 1:
+                builder = InlineKeyboardBuilder()
+                builder.button(text="⚡ Switch to Normal Search (1 Credit)", callback_data="phone_mode:normal")
+                builder.button(text="💳 Request Recharge", callback_data="request_recharge")
+                builder.adjust(1)
+                return await message.answer(
+                    f"⚠️ <b>Insufficient Credits for Deep Search!</b>\n\n"
+                    f"Deep Search requires <b>3 credits</b>, but your current balance is <b>{effective_credits} credit(s)</b>.\n\n"
+                    f"You have enough balance to run a <b>Normal Search (1 credit)</b>, or recharge credits below:",
+                    reply_markup=builder.as_markup(),
+                    parse_mode="HTML"
+                )
+            else:
+                return await message.answer(
+                    f"⚠️ <b>Search Quota Exhausted!</b>\n\n"
+                    f"This search requires <b>{credit_cost} credit(s)</b>, but your available balance is <b>{effective_credits}</b>.\n"
+                    f"Please request a recharge or return tomorrow for your daily bonus credits.",
+                    reply_markup=get_recharge_request_keyboard(),
+                    parse_mode="HTML"
+                )
 
         if not has_sub:
-            # Deduct credit safely, tracking whether bonus or permanent credits were used
-            success, deducted_source = await user_service.deduct_credit(user.telegram_user_id, 1)
+            # Deduct credit safely, tracking exact bonus vs permanent credits used
+            success, deduction_info = await user_service.deduct_credit(user.telegram_user_id, amount=credit_cost)
             if not success:
                 return await message.answer("Failed to process credits. Please try again.")
 
@@ -717,10 +884,16 @@ async def process_search_input(message: Message, session: AsyncSession, state: F
         if search_queue_count > 15:
             wait_msg = await message.answer(f"⏳ <b>You are in a queue!</b>\nPeople ahead of you: {search_queue_count - 15}\n<i>I will notify you when your search is over.</i>", parse_mode="HTML")
         else:
-            wait_msg = await message.answer("⏳ <b>Querying Global Database, please wait...</b>\n<code>[          ]</code>", parse_mode="HTML")
+            if search_type == "phone" and search_mode == "deep":
+                wait_msg = await message.answer("🔬 <b>Initializing Deep Intelligence Scan...</b>\n<code>[          ]</code>", parse_mode="HTML")
+            else:
+                wait_msg = await message.answer("⏳ <b>Querying Global Database, please wait...</b>\n<code>[          ]</code>", parse_mode="HTML")
 
         search_service = SearchService(session)
-        search_task = asyncio.create_task(search_service.search(user, query=query, search_type=search_type))
+        if search_type == "phone" and search_mode == "deep":
+            search_task = asyncio.create_task(search_service.search_deep_phone(user, phone=query))
+        else:
+            search_task = asyncio.create_task(search_service.search(user, query=query, search_type=search_type))
 
         frames = [
             "[=         ]",
@@ -738,6 +911,13 @@ async def process_search_input(message: Message, session: AsyncSession, state: F
         if search_queue_count > 15:
             animation_texts = [
                 f"⏳ <b>You are in a queue!</b> ({search_queue_count - 15} ahead of you)\n<i>I will notify you when your search is over.</i>"
+            ]
+        elif search_type == "phone" and search_mode == "deep":
+            animation_texts = [
+                "🔬 <b>Initializing Deep Intelligence Scan...</b>",
+                "🔄 <b>Executing Reverse Aadhaar SIM Pivot...</b>",
+                "👨‍👩‍👧‍👦 <b>Correlating Household & Family Linkages...</b>",
+                "🛡️ <b>Scanning Digital Archives & Online Footprint...</b>"
             ]
         elif search_type == "email":
             animation_texts = [
@@ -803,14 +983,18 @@ async def process_search_input(message: Message, session: AsyncSession, state: F
                 parts.append(f"🪙 {user.credits} permanent")
             credits_display = " | ".join(parts) if parts else "0"
 
-        header = "✅ <b>Search Successful!</b>\n\n"
-        footer = f"\n\n💰 <b>Remaining credits:</b> <code>{credits_display}</code>"
+        if search_type == "phone" and search_mode == "deep":
+            header = ""
+            footer = f"\n💰 <b>Remaining Balance:</b> <code>{credits_display}</code>"
+        else:
+            header = "✅ <b>Search Successful!</b>\n\n"
+            footer = f"\n\n💰 <b>Remaining credits:</b> <code>{credits_display}</code>"
         await send_long_search_result(message, header, result['data'], footer)
     else:
-        # If search failed, auto-refund the deducted credit preserving bonus vs permanent source!
-        if not is_admin and not has_sub and deducted_source in ("bonus", "permanent"):
-            await user_service.refund_credit(user.telegram_user_id, 1, source=deducted_source)
-            refund_note = "\n\n💰 <i>Your search credit has been automatically refunded.</i>"
+        # If search failed or yielded no results, auto-refund the deducted credits!
+        if not is_admin and not has_sub and deduction_info:
+            await user_service.refund_deduction(user.telegram_user_id, deduction_info)
+            refund_note = f"\n\n💰 <i>Your {credit_cost} search credit(s) have been automatically refunded.</i>"
         else:
             refund_note = ""
         await message.answer(f"❌ {result.get('data', 'Database temporarily unavailable.')}{refund_note}", parse_mode="HTML")

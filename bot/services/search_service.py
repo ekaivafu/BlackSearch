@@ -195,3 +195,76 @@ class SearchService:
         await self.session.flush()
 
         return {"success": is_success, "data": mock_result}
+
+    async def search_deep_phone(self, user: User, phone: str) -> dict:
+        """
+        Executes a 4-hop Deep OSINT investigation on a phone number, costing 3 credits.
+        Pivots: Target profile -> Aadhaar reverse SIMs -> Alt contacts -> Family/Households -> Digital footprint.
+        """
+        if len(phone) < 10:
+            return {"success": False, "message": "Query too short."}
+
+        safe_query = html.escape(phone)
+        loop = asyncio.get_running_loop()
+        start_time = time.time()
+        is_success = False
+
+        try:
+            deep_future = loop.run_in_executor(
+                duckdb_service.pool,
+                duckdb_service.run_deep_phone_search,
+                phone
+            )
+            raw_res = await asyncio.wait_for(deep_future, timeout=35.0)
+
+            deep_data = raw_res.get("deep_data")
+            is_success = bool(raw_res.get("count", 0)) and bool(deep_data)
+
+            if is_success:
+                target_email = deep_data.get("email")
+                email_osint = None
+                if target_email and not duckdb_service.is_invalid_val(target_email):
+                    from bot.services.osint_service import OSINTService
+                    try:
+                        email_osint = await asyncio.wait_for(
+                            OSINTService.check_email_full(str(target_email).strip()),
+                            timeout=6.0
+                        )
+                    except Exception as oe:
+                        logger.debug(f"Email OSINT pivot notice: {oe}")
+
+                duration = round(time.time() - start_time, 2)
+                mock_result = duckdb_service.format_deep_phone_result(deep_data, duration=duration, email_osint=email_osint)
+            else:
+                duration = round(time.time() - start_time, 2)
+                mock_result = f"🔍 <b>Query:</b> <code>{safe_query}</code>  |  ⏱️ <b>Time:</b> {duration}s\n\n<b>--- Intelligence Records ---</b>\n❌ No records found in database."
+
+        except asyncio.TimeoutError:
+            logger.error(f"Deep search timed out for {phone}")
+            is_success = False
+            mock_result = "<b>Search Timed Out:</b> The deep investigation took longer than expected to resolve. Please try again in a few moments."
+        except Exception as e:
+            logger.error(f"Deep search error for {phone}: {e}", exc_info=True)
+            is_success = False
+            err_str = str(e).lower()
+            if "429" in err_str or "rate limit" in err_str or "too many requests" in err_str:
+                mock_result = "<b>High Network Load:</b> The intelligence database is currently handling heavy search volume. Please wait 1-2 minutes and try again."
+            else:
+                mock_result = "<b>Service Temporarily Busy:</b> Could not retrieve records from the intelligence database. Please try again shortly."
+
+        # Log the search with credits_used = 3
+        log = SearchLog(
+            user_id=user.id,
+            query_metadata={"query": phone, "type": "phone_deep"},
+            success=1 if is_success else 0,
+            credits_used=3 if is_success else 0
+        )
+        self.session.add(log)
+
+        if is_success:
+            user.total_searches += 1
+
+        await self.session.flush()
+
+        return {"success": is_success, "data": mock_result}
+

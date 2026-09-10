@@ -675,3 +675,204 @@ def format_result(row: dict) -> str:
         lines.append(f"🔗 <b>Connected Numbers:</b> {num_str}")
         
     return "\n".join(lines)
+
+
+def run_deep_phone_search(phone: str, limit: int = 10) -> dict:
+    """Executes multi-hop OSINT pivots: primary profile -> Aadhaar reverse SIMs -> alt contact -> family members."""
+    digits = "".join(c for c in str(phone) if c.isdigit())
+    clean_phone = digits[-10:] if len(digits) >= 10 else digits
+    cache_key = f"deep:phone:{clean_phone}"
+    cached = _get_cached_result(cache_key)
+    if cached is not None:
+        return cached
+
+    # Hop 0: Target Profile
+    main_res = run_sync_search("phone", clean_phone, limit=limit)
+    records = main_res.get("results", [])
+    if not records:
+        empty_res = {"count": 0, "results": [], "deep_data": None}
+        return empty_res
+
+    target = records[0]
+    aadhar = target.get("aadharNumber") if not is_invalid_val(target.get("aadharNumber")) else None
+    alt_phone = target.get("otherNumber") if not is_invalid_val(target.get("otherNumber")) else None
+    father = target.get("fathersName") if not is_invalid_val(target.get("fathersName")) else None
+
+    futures = {}
+    if aadhar:
+        futures["aadhar_sims"] = pool.submit(run_sync_search, "aadhar", str(aadhar).strip(), 10)
+
+    if alt_phone:
+        alt_digits = "".join(c for c in str(alt_phone) if c.isdigit())[-10:]
+        if alt_digits and alt_digits != clean_phone:
+            futures["alt_contact"] = pool.submit(run_sync_search, "phone", alt_digits, 5)
+
+    if aadhar and father and len(father) > 4:
+        achunks = get_aadhar_chunks(str(aadhar))
+        achunk = achunks[0] if achunks else 0
+        def _find_family():
+            try:
+                con = _get_conn()
+                cur = con.cursor()
+                safe_father = str(father).replace("'", "''")
+                sql = f"SELECT name, fathersName, phoneNumber, aadharNumber, address FROM read_parquet('{HF_INDEX_BASE}/idx_aadhar.{achunk}.parquet') WHERE fathersName = '{safe_father}' LIMIT 8"
+                rows = cur.execute(sql).fetchall()
+                cols = [d[0] for d in cur.description]
+                return [dict(zip(cols, r)) for r in rows]
+            except Exception as e:
+                print(f"Family lookup error: {e}")
+                return []
+        futures["family"] = pool.submit(_find_family)
+
+    results = {}
+    for k, f in futures.items():
+        try:
+            results[k] = f.result(timeout=15.0)
+        except Exception as e:
+            print(f"Deep pivot {k} timed out or failed: {e}")
+            results[k] = None
+
+    # Parse linked sims
+    linked_sims = []
+    seen_sims = {clean_phone}
+    if results.get("aadhar_sims"):
+        for r in results["aadhar_sims"].get("results", []):
+            p = "".join(c for c in str(r.get("phoneNumber") or "") if c.isdigit())[-10:]
+            if p and p not in seen_sims and not is_invalid_val(p):
+                seen_sims.add(p)
+                linked_sims.append(r)
+
+    # Parse family
+    family_members = []
+    seen_fam = set()
+    if results.get("family"):
+        for r in results["family"]:
+            p = "".join(c for c in str(r.get("phoneNumber") or "") if c.isdigit())[-10:]
+            a = "".join(c for c in str(r.get("aadharNumber") or "") if c.isdigit())[-12:]
+            if (p and p == clean_phone) or (aadhar and a and a == str(aadhar)[-12:]):
+                continue
+            k = (r.get("name"), p, a)
+            if k in seen_fam:
+                continue
+            seen_fam.add(k)
+            family_members.append(r)
+
+    # Parse alt contacts
+    alt_contacts = []
+    if results.get("alt_contact"):
+        alt_contacts = results["alt_contact"].get("results", [])[:2]
+
+    deep_data = {
+        "phone": clean_phone,
+        "target": target,
+        "all_records": records,
+        "linked_sims": linked_sims,
+        "family_members": family_members,
+        "alt_contacts": alt_contacts,
+        "email": target.get("Email")
+    }
+
+    resp = {
+        "count": len(records),
+        "results": records,
+        "deep_data": deep_data
+    }
+    _set_cached_result(cache_key, resp)
+    return resp
+
+
+def format_deep_phone_result(deep_data: dict, duration: float = 0.0, email_osint: dict = None) -> str:
+    """Formats the deep intelligence dossier as rich, structured Telegram HTML."""
+    target = deep_data.get("target") or {}
+    phone = deep_data.get("phone", "")
+    safe_phone = html.escape(str(phone))
+
+    lines = [
+        "🔬 <b>DEEP INTELLIGENCE DOSSIER</b>",
+        "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━",
+        f"🎯 <b>Investigated Target:</b> <code>{safe_phone}</code>",
+        f"⏱️ <b>Investigation Time:</b> {duration:.2f}s | <b>Credits Charged:</b> 3 Credits\n"
+    ]
+
+    # 1. Primary Identity
+    lines.append("👤 <b>PRIMARY IDENTITY & CARRIER</b>")
+    if target.get("name") and not is_invalid_val(target.get("name")):
+        lines.append(f"├ 👤 <b>Full Name:</b> {html.escape(str(target['name']).strip())}")
+    if target.get("fathersName") and not is_invalid_val(target.get("fathersName")):
+        lines.append(f"├ 👨‍👦 <b>Father's Name:</b> {html.escape(str(target['fathersName']).strip())}")
+    if target.get("aadharNumber") and not is_invalid_val(target.get("aadharNumber")):
+        lines.append(f"├ 🪪 <b>Aadhaar Number:</b> <code>{html.escape(str(target['aadharNumber']).strip())}</code>")
+    lines.append(f"├ 📱 <b>Primary Mobile:</b> <code>{safe_phone}</code>")
+    if target.get("Carrier") and not is_invalid_val(target.get("Carrier")):
+        lines.append(f"├ 📡 <b>Telecom Operator:</b> {html.escape(str(target['Carrier']).strip())}")
+    if target.get("address") and not is_invalid_val(target.get("address")):
+        clean_addr = clean_address(target['address'])
+        if clean_addr:
+            lines.append(f"├ 🏠 <b>Registered Address:</b> {html.escape(clean_addr)}")
+    if target.get("Email") and not is_invalid_val(target.get("Email")):
+        lines.append(f"└ 📧 <b>Email Address:</b> <code>{html.escape(str(target['Email']).strip())}</code>")
+    else:
+        if lines[-1].startswith("├ "):
+            lines[-1] = "└ " + lines[-1][2:]
+    lines.append("")
+
+    # 2. Linked SIM Cards (Same Aadhaar)
+    linked_sims = deep_data.get("linked_sims", [])
+    lines.append("📱 <b>LINKED SIM CARDS (Same Aadhaar Identity)</b>")
+    if linked_sims:
+        lines.append(f"<i>Discovered {len(linked_sims)} additional registered mobile number(s):</i>")
+        for idx, sim in enumerate(linked_sims):
+            prefix = "└ " if idx == len(linked_sims) - 1 else "├ "
+            sim_no = sim.get("phoneNumber") or ""
+            sim_name = sim.get("name") or target.get("name") or "Citizen"
+            lines.append(f"{prefix}📱 <code>{html.escape(str(sim_no))}</code> (Registered to: <b>{html.escape(str(sim_name))}</b>)")
+    else:
+        lines.append("<i>No additional SIM cards registered under this Aadhaar.</i>")
+    lines.append("")
+
+    # 3. Family & Household Connections
+    family = deep_data.get("family_members", [])
+    lines.append("👨‍👩‍👧‍👦 <b>FAMILY & HOUSEHOLD LINKAGES</b>")
+    if family:
+        lines.append(f"<i>Identified {len(family)} probable family member(s) via parental lineage:</i>")
+        for idx, fam in enumerate(family):
+            prefix = "└ " if idx == len(family) - 1 else "├ "
+            fam_name = fam.get("name", "Relative")
+            fam_ph = fam.get("phoneNumber", "")
+            fam_ad = fam.get("aadharNumber", "")
+            fam_line = f"{prefix}👤 <b>{html.escape(str(fam_name))}</b>"
+            if not is_invalid_val(fam_ph):
+                fam_line += f" — 📱 <code>{html.escape(str(fam_ph))}</code>"
+            if not is_invalid_val(fam_ad):
+                fam_line += f" | 🪪 <code>{html.escape(str(fam_ad))}</code>"
+            lines.append(fam_line)
+    else:
+        lines.append("<i>No direct co-habitants or siblings matched in registry chunk.</i>")
+    lines.append("")
+
+    # 4. Emergency / Alternate Contacts
+    alt_contacts = deep_data.get("alt_contacts", [])
+    if alt_contacts:
+        lines.append("📞 <b>EMERGENCY & ALTERNATE CONTACTS</b>")
+        for idx, ac in enumerate(alt_contacts):
+            prefix = "└ " if idx == len(alt_contacts) - 1 else "├ "
+            ac_ph = ac.get("phoneNumber", "")
+            ac_name = ac.get("name", "Contact")
+            lines.append(f"{prefix}📞 <code>{html.escape(str(ac_ph))}</code> (Registered to: <b>{html.escape(str(ac_name))}</b>)")
+        lines.append("")
+
+    # 5. Gravatar / Breach Scan if present
+    if email_osint:
+        breach_count = email_osint.get("breach_count", 0)
+        breaches = email_osint.get("breaches", [])
+        gravatar = email_osint.get("gravatar")
+        if gravatar or breach_count > 0:
+            lines.append("🌐 <b>DIGITAL FOOTPRINT & BREACH INTELLIGENCE</b>")
+            if gravatar and gravatar.get("display_name"):
+                lines.append(f"├ 👤 <b>Public Online Name:</b> {html.escape(gravatar['display_name'])}")
+            if breach_count > 0:
+                top_b = ", ".join(f"<code>{html.escape(b)}</code>" for b in breaches[:8])
+                lines.append(f"└ 🛡️ <b>Leaked in {breach_count} Breach(es):</b> {top_b}")
+            lines.append("")
+
+    return "\n".join(lines)

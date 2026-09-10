@@ -262,17 +262,18 @@ class UserService:
         await self.session.flush()
         return user
 
-    async def deduct_credit(self, telegram_id: int, amount: int = 1) -> Tuple[bool, str]:
+    async def deduct_credit(self, telegram_id: int, amount: int = 1) -> Tuple[bool, dict]:
         """Deducts credit safely. Must be called in a transaction.
-        Returns (success: bool, source: str) where source is 'unlimited', 'bonus', or 'permanent'.
+        Returns (success: bool, deduction_info: dict)
+        deduction_info contains: {"unlimited": bool, "bonus": int, "permanent": int, "total": int}
         """
         user = await self.get_user_by_telegram_id(telegram_id)
         if not user or user.status != UserStatus.APPROVED:
-            return False, "unauthorized"
+            return False, {"unauthorized": True}
 
         # If user has an active unlimited subscription, allow the search for free
         if getattr(user, "has_active_subscription", False):
-            return True, "unlimited"
+            return True, {"unlimited": True, "bonus": 0, "permanent": 0, "total": 0}
 
         now = get_now_ist()
         if user.bonus_credits_expire_at and now > _to_ist(user.bonus_credits_expire_at):
@@ -281,19 +282,21 @@ class UserService:
 
         total_available = user.credits + (user.bonus_credits or 0)
         if total_available < amount:
-            return False, "insufficient"
+            return False, {"insufficient": True}
 
         # Deduct from expiring daily bonus credits first!
+        from_bonus = 0
+        from_perm = 0
         remaining = amount
-        deducted_source = "permanent"
-        if user.bonus_credits > 0:
+
+        if user.bonus_credits and user.bonus_credits > 0:
             from_bonus = min(user.bonus_credits, remaining)
             user.bonus_credits -= from_bonus
             remaining -= from_bonus
-            deducted_source = "bonus"
 
         if remaining > 0:
-            user.credits -= remaining
+            from_perm = remaining
+            user.credits -= from_perm
 
         tx = CreditTransaction(
             user_id=user.id,
@@ -304,7 +307,49 @@ class UserService:
         )
         self.session.add(tx)
         await self.session.flush()
-        return True, deducted_source
+        
+        deduction_info = {
+            "unlimited": False,
+            "bonus": from_bonus,
+            "permanent": from_perm,
+            "total": amount
+        }
+        return True, deduction_info
+
+    async def refund_deduction(self, telegram_id: int, deduction_info: dict) -> bool:
+        """Refunds exact deducted credits preserving bonus vs permanent breakdown."""
+        if not deduction_info or deduction_info.get("unlimited"):
+            return True
+
+        user = await self.get_user_by_telegram_id(telegram_id)
+        if not user:
+            return False
+
+        bonus_amt = int(deduction_info.get("bonus", 0))
+        perm_amt = int(deduction_info.get("permanent", 0))
+        total_refund = bonus_amt + perm_amt
+
+        if total_refund <= 0:
+            return True
+
+        if bonus_amt > 0:
+            user.bonus_credits = (user.bonus_credits or 0) + bonus_amt
+            if not user.bonus_credits_expire_at:
+                user.bonus_credits_expire_at = get_end_of_today_ist()
+
+        if perm_amt > 0:
+            user.credits = (user.credits or 0) + perm_amt
+
+        tx = CreditTransaction(
+            user_id=user.id,
+            amount=total_refund,
+            transaction_type=TransactionType.ADMIN_ADJUSTMENT,
+            balance_after=user.credits + (user.bonus_credits or 0),
+            created_by=telegram_id
+        )
+        self.session.add(tx)
+        await self.session.flush()
+        return True
 
     async def refund_credit(self, telegram_id: int, amount: int = 1, source: str = "permanent") -> bool:
         """Adds credits back upon search failure or timeout.
