@@ -1,9 +1,30 @@
+# Environments
 .env
-*.env
-__pycache__/
-*.pyc
-*.pyo
+.venv
+env/
 venv/
-.venv/
-.DS_Store
-*.log
+ENV/
+env.bak/
+venv.bak/
+
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# IDEs
+.vscode/
+.idea/
+
+# DuckDB / Local DBs
+*.db
+*.wal
+
+# Distribution / packaging
+build/
+dist/
+*.egg-info/
+
+# Scratch and test files
+test_read.py
+*.txt

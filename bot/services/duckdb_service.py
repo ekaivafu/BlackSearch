@@ -3,6 +3,10 @@ import re
 import threading
 from concurrent.futures import ThreadPoolExecutor
 import duckdb
+from dotenv import load_dotenv
+
+_env_path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), ".env")
+load_dotenv(_env_path)
 
 # ── Config ──────────────────────────────────────────────────────────────────
 HF_INDEX_BASE = os.environ.get(
@@ -57,7 +61,11 @@ def _get_conn():
         if _global_conn is not None:
             return _global_conn
             
-        md_token = os.environ.get("MOTHERDUCK_TOKEN", "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJlbWFpbCI6InNhLWQ3ZjdiODY5LTcyYTAtNGMwZS1hNmY3LTZjYjlkZjA4MWU3N0BzYS5tb3RoZXJkdWNrLmNvbSIsIm1kUmVnaW9uIjoiYXdzLWFwLW5vcnRoZWFzdC0xIiwic2Vzc2lvbiI6InNhLWQ3ZjdiODY5LTcyYTAtNGMwZS1hNmY3LTZjYjlkZjA4MWU3Ny5zYS5tb3RoZXJkdWNrLmNvbSIsInBhdCI6IjZWV1lZV05DcUtSRzlnVGMtelVMYlNoandvX2s5SmcwdTRmRXNQMFB5V2MiLCJ1c2VySWQiOiJmMDNjZGM1ZC01ZmYwLTRlYTItOTc5MS1kNjk2MmE3NDczOWEiLCJpc3MiOiJtZF9wYXQiLCJyZWFkT25seSI6ZmFsc2UsInRva2VuVHlwZSI6InJlYWRfd3JpdGUiLCJpYXQiOjE3ODgxNzg5MTR9.a8bAHSdpgv5kZfSp1219_RWRUhzgyHrGQJ6XQQdK0mg")
+        md_token = os.environ.get("MOTHERDUCK_TOKEN")
+        if not md_token:
+            print("❌ FATAL ERROR: MOTHERDUCK_TOKEN is not set in environment or .env file.")
+            raise Exception("MOTHERDUCK_TOKEN is missing in environment or .env file.")
+
         
         try:
             print("🚀 Connecting to MotherDuck Cloud...")
