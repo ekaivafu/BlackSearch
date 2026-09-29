@@ -86,7 +86,14 @@ class SearchService:
             is_success = bool(data.get("count", 0)) or bool(osint_sites) or bool(breach_count)
             
             # Format Database Results
-            if data.get("count", 0):
+            if data.get("error") and not data.get("count", 0):
+                results_text = (
+                    f"🔍 <b>Query:</b> <code>{safe_query}</code>  |  ⏱️ <b>Time:</b> {duration}s\n\n"
+                    f"⚠️ <b>Engine Notice:</b>\n<code>{html.escape(str(data['error']))}</code>\n\n"
+                    "<i>Please ensure MOTHERDUCK_TOKEN and HF_TOKEN are set in Render's Environment tab.</i>"
+                )
+                is_success = False
+            elif data.get("count", 0):
                 results_text = f"🔍 <b>Query:</b> <code>{safe_query}</code>  |  <b>Found:</b> {data['count']} records  |  ⏱️ <b>Time:</b> {duration}s\n\n"
                 title = "--- Identity Linkage (from Vault) ---" if search_type == "username" else "--- Intelligence Records ---"
                 results_text += f"<b>{title}</b>\n\n"
@@ -235,6 +242,13 @@ class SearchService:
 
                 duration = round(time.time() - start_time, 2)
                 mock_result = duckdb_service.format_deep_phone_result(deep_data, duration=duration, email_osint=email_osint)
+            elif raw_res.get("error"):
+                duration = round(time.time() - start_time, 2)
+                mock_result = (
+                    f"🔍 <b>Query:</b> <code>{safe_query}</code>  |  ⏱️ <b>Time:</b> {duration}s\n\n"
+                    f"⚠️ <b>Deep Search Engine Notice:</b>\n<code>{html.escape(str(raw_res['error']))}</code>\n\n"
+                    "<i>Please ensure MOTHERDUCK_TOKEN and HF_TOKEN are set in Render's Environment tab.</i>"
+                )
             else:
                 duration = round(time.time() - start_time, 2)
                 mock_result = f"🔍 <b>Query:</b> <code>{safe_query}</code>  |  ⏱️ <b>Time:</b> {duration}s\n\n<b>--- Intelligence Records ---</b>\n❌ No records found in database."

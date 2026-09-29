@@ -597,7 +597,7 @@ def run_sync_search(search_type: str, query: str, limit: int = 10) -> dict:
             main_data = fut_main.result()
         except Exception as e:
             print(f"Main field search error: {e}")
-            main_data = {"count": 0, "results": []}
+            main_data = {"field": "phoneNumber", "value": q, "mode": "exact", "count": 0, "results": [], "error": str(e)}
 
         try:
             tc_res = fut_tc.result()
@@ -827,7 +827,7 @@ def run_deep_phone_search(phone: str, limit: int = 10) -> dict:
     main_res = run_sync_search("phone", clean_phone, limit=limit)
     records = main_res.get("results", [])
     if not records:
-        empty_res = {"count": 0, "results": [], "deep_data": None}
+        empty_res = {"count": 0, "results": [], "deep_data": None, "error": main_res.get("error")}
         return empty_res
 
     target = records[0]
