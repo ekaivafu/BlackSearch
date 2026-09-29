@@ -166,3 +166,14 @@ class Blacklist(Base):
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     created_by = Column(BigInteger, nullable=True)  # Telegram ID of admin
 
+class Seller(Base):
+    __tablename__ = "sellers"
+
+    id = Column(Integer, primary_key=True, index=True)
+    username = Column(String(100), nullable=False, unique=True, index=True)  # e.g. "tgekaiva" or "seller_name"
+    telegram_id = Column(BigInteger, nullable=True)  # Optional numeric ID
+    name = Column(String(100), nullable=True)  # Optional friendly name
+    is_active = Column(Boolean, default=True, nullable=False)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    created_by = Column(BigInteger, nullable=True)  # Telegram ID of admin who added
+

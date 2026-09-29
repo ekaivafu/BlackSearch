@@ -16,6 +16,7 @@ from bot.middleware.db import DbSessionMiddleware
 from bot.middleware.auth import ThrottlingMiddleware
 from bot.middleware.forcesub import ForceSubMiddleware
 from bot.middleware.daily_bonus import DailyBonusMiddleware
+from bot.middleware.seller_check import SellerCheckMiddleware
 from bot.handlers import user, admin
 from bot.services import duckdb_service
 
@@ -47,6 +48,8 @@ async def main():
     # Middlewares
     dp.update.middleware(DbSessionMiddleware(async_session))
     dp.message.middleware(ThrottlingMiddleware(limit_seconds=1.0))
+    dp.message.middleware(SellerCheckMiddleware())
+    dp.callback_query.middleware(SellerCheckMiddleware())
     dp.message.middleware(ForceSubMiddleware())
     dp.callback_query.middleware(ForceSubMiddleware())
     dp.message.middleware(DailyBonusMiddleware())
@@ -57,6 +60,30 @@ async def main():
     
     # Database auto-migration and plan seeding
     await init_db()
+
+    # Verify seller configuration and alert admins if missing
+    async with async_session() as session:
+        from bot.services.seller_service import SellerService
+        from bot.keyboards.inline import get_admin_seller_alert_keyboard
+        seller_service = SellerService(session)
+        has_sellers = await seller_service.has_sellers()
+        if not has_sellers:
+            logger.warning("No sellers configured in database! Alerting admins and pausing bot for regular users...")
+            alert_text = (
+                "⚠️ <b>CRITICAL SETUP REQUIRED: Seller Missing!</b>\n"
+                "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+                "No recharge seller username or ID is configured in the bot.\n\n"
+                "🛑 <b>The bot will NOT reply to regular users</b> until you configure at least one seller username.\n\n"
+                "👉 Click <b>➕ Add Seller Now</b> below or use /admin to add a seller:"
+            )
+            alert_kb = get_admin_seller_alert_keyboard()
+            for admin_id in config.admin_ids:
+                try:
+                    await bot.send_message(admin_id, alert_text, reply_markup=alert_kb, parse_mode="HTML")
+                except Exception as e:
+                    logger.warning(f"Could not alert admin {admin_id}: {e}")
+        else:
+            logger.info("Seller check passed: active sellers found.")
 
     # Pre-warm DuckDB caches in background thread so all searches are instant (<1.5s)
     duckdb_service.start_background_warmup()

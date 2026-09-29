@@ -27,7 +27,7 @@ def get_recharge_amounts_keyboard() -> InlineKeyboardMarkup:
     builder.adjust(3, 1)
     return builder.as_markup()
 
-def get_payment_packages_keyboard(plans: list = None) -> InlineKeyboardMarkup:
+def get_payment_packages_keyboard(plans: list = None, sellers: list = None) -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
     if plans:
         for p in plans:
@@ -42,6 +42,12 @@ def get_payment_packages_keyboard(plans: list = None) -> InlineKeyboardMarkup:
         builder.button(text="₹200 for 1 day unlimited", callback_data="buy_package_-1")
         builder.button(text="₹700 for 7 days unlimited", callback_data="buy_package_-7")
     builder.adjust(1)
+    
+    if sellers:
+        for s in sellers:
+            uname = s.username.lstrip("@")
+            builder.row(InlineKeyboardButton(text=f"💬 Contact Seller (@{uname})", url=f"https://t.me/{uname}"))
+
     return builder.as_markup()
 
 def get_admin_plans_keyboard() -> InlineKeyboardMarkup:
@@ -176,6 +182,42 @@ def get_blacklist_items_keyboard(items: list) -> InlineKeyboardMarkup:
         display_val = item.value if len(item.value) <= 22 else f"{item.value[:20]}…"
         builder.button(text=f"🗑️ {icon} {display_val}", callback_data=f"bl_del_{item.id}")
     builder.button(text="🔙 Back to Blocklist Menu", callback_data="bl_menu")
+    builder.adjust(1)
+    return builder.as_markup()
+
+# ─── ADMIN SELLER KEYBOARDS ─────────────────────────────────────────────────
+
+def get_admin_seller_alert_keyboard() -> InlineKeyboardMarkup:
+    builder = InlineKeyboardBuilder()
+    builder.button(text="➕ Add Seller Now", callback_data="admin_seller_add")
+    return builder.as_markup()
+
+def get_admin_sellers_keyboard() -> InlineKeyboardMarkup:
+    builder = InlineKeyboardBuilder()
+    builder.button(text="➕ Add Seller", callback_data="admin_seller_add")
+    builder.button(text="🗑️ Remove Seller", callback_data="admin_seller_del_list")
+    builder.button(text="🔄 Refresh", callback_data="admin_seller_refresh")
+    builder.button(text="❌ Close", callback_data="admin_seller_close")
+    builder.adjust(2, 2)
+    return builder.as_markup()
+
+def get_sellers_delete_keyboard(sellers: list) -> InlineKeyboardMarkup:
+    builder = InlineKeyboardBuilder()
+    for s in sellers:
+        uname = s.username.lstrip("@")
+        label = f"🗑️ @{uname}"
+        if getattr(s, "name", None) and s.name != uname:
+            label += f" ({s.name})"
+        builder.button(text=label, callback_data=f"admin_seller_del_{s.id}")
+    builder.button(text="🔙 Back to Sellers", callback_data="admin_seller_refresh")
+    builder.adjust(1)
+    return builder.as_markup()
+
+def get_seller_contact_keyboard(sellers: list) -> InlineKeyboardMarkup:
+    builder = InlineKeyboardBuilder()
+    for s in sellers:
+        uname = s.username.lstrip("@")
+        builder.button(text=f"💬 Message @{uname}", url=f"https://t.me/{uname}")
     builder.adjust(1)
     return builder.as_markup()
 

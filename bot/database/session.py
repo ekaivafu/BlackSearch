@@ -61,6 +61,16 @@ async def init_db():
                     );
                     CREATE INDEX IF NOT EXISTS ix_blacklists_target_type ON blacklists (target_type);
                     CREATE INDEX IF NOT EXISTS ix_blacklists_value ON blacklists (value);
+                    CREATE TABLE IF NOT EXISTS sellers (
+                        id SERIAL PRIMARY KEY,
+                        username VARCHAR(100) NOT NULL UNIQUE,
+                        telegram_id BIGINT,
+                        name VARCHAR(100),
+                        is_active BOOLEAN DEFAULT TRUE,
+                        created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+                        created_by BIGINT
+                    );
+                    CREATE INDEX IF NOT EXISTS ix_sellers_username ON sellers (username);
                 """))
             except Exception:
                 pass

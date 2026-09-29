@@ -1184,8 +1184,9 @@ async def process_search_input(message: Message, session: AsyncSession, state: F
             refund_note = ""
         await message.answer(f"❌ {result.get('data', 'Database temporarily unavailable.')}{refund_note}", parse_mode="HTML")
 
-from bot.keyboards.inline import get_payment_packages_keyboard
+from bot.keyboards.inline import get_payment_packages_keyboard, get_seller_contact_keyboard
 from bot.services.plan_service import PlanService
+from bot.services.seller_service import SellerService
 from bot.models.models import PlanType
 
 @router.message(Command("recharge"))
@@ -1195,13 +1196,16 @@ async def cmd_recharge(message: Message, session: AsyncSession, bot: Bot):
     
     plan_service = PlanService(session)
     plans = await plan_service.get_all_plans(active_only=True)
+    seller_service = SellerService(session)
+    sellers = await seller_service.get_active_sellers()
+    sellers_contact_str = await seller_service.format_sellers_summary()
     
     text = (
         "👑 <b>Buy Credits or Unlimited Plans</b>\n\n"
-        "To purchase, please contact the owner @tgekaiva.\n\n"
+        f"To purchase, please contact our authorized seller ({sellers_contact_str}).\n\n"
         "Select the package you want to buy below to send a purchase request to the admin:"
     )
-    await message.answer(text, reply_markup=get_payment_packages_keyboard(plans), parse_mode="HTML")
+    await message.answer(text, reply_markup=get_payment_packages_keyboard(plans, sellers=sellers), parse_mode="HTML")
 
 @router.callback_query(F.data == "request_recharge")
 async def cb_request_recharge(callback: CallbackQuery, session: AsyncSession, bot: Bot):
@@ -1218,13 +1222,16 @@ async def cb_request_recharge(callback: CallbackQuery, session: AsyncSession, bo
 
     plan_service = PlanService(session)
     plans = await plan_service.get_all_plans(active_only=True)
+    seller_service = SellerService(session)
+    sellers = await seller_service.get_active_sellers()
+    sellers_contact_str = await seller_service.format_sellers_summary()
 
     text = (
         "👑 <b>Buy Credits or Unlimited Plans</b>\n\n"
-        "To purchase, please contact the owner @tgekaiva.\n\n"
+        f"To purchase, please contact our authorized seller ({sellers_contact_str}).\n\n"
         "Select the package you want to buy below to send a purchase request to the admin:"
     )
-    await callback.message.answer(text, reply_markup=get_payment_packages_keyboard(plans), parse_mode="HTML")
+    await callback.message.answer(text, reply_markup=get_payment_packages_keyboard(plans, sellers=sellers), parse_mode="HTML")
     await callback.answer()  # dismiss the button spinner
 
 
@@ -1320,20 +1327,28 @@ async def cb_buy_plan(callback: CallbackQuery, session: AsyncSession, bot: Bot):
     is_updated = getattr(req, "is_updated", False)
     pkg_name = f"{plan.name} (₹{plan.price})"
 
+    seller_service = SellerService(session)
+    sellers = await seller_service.get_active_sellers()
+    sellers_notice = await seller_service.format_recharge_notice()
+    sellers_contact_str = await seller_service.format_sellers_summary()
+    contact_kb = get_seller_contact_keyboard(sellers) if sellers else None
+
     if is_updated:
-        await callback.answer("🔄 Request updated! Please contact @tgekaiva to pay.")
+        await callback.answer(f"🔄 Request updated! Please contact {sellers_contact_str} to pay.")
         await callback.message.edit_text(
             f"🔄 <b>Purchase Request Updated!</b>\n\nYou updated your selection to: <b>{pkg_name}</b>\n\n"
-            "👉 <b>Please message @tgekaiva to complete your payment.</b>\n"
+            f"{sellers_notice}\n"
             "Once payment is confirmed, your account will be upgraded instantly!",
+            reply_markup=contact_kb,
             parse_mode="HTML"
         )
     else:
-        await callback.answer("✅ Request sent! Please contact @tgekaiva to pay.")
+        await callback.answer(f"✅ Request sent! Please contact {sellers_contact_str} to pay.")
         await callback.message.edit_text(
             f"✅ <b>Purchase Request Sent!</b>\n\nYou selected: <b>{pkg_name}</b>\n\n"
-            "👉 <b>Please message @tgekaiva to complete your payment.</b>\n"
+            f"{sellers_notice}\n"
             "Once payment is confirmed, your account will be upgraded instantly!",
+            reply_markup=contact_kb,
             parse_mode="HTML"
         )
 
@@ -1361,20 +1376,28 @@ async def cb_buy_package(callback: CallbackQuery, session: AsyncSession, bot: Bo
 
     is_updated = getattr(req, "is_updated", False)
 
+    seller_service = SellerService(session)
+    sellers = await seller_service.get_active_sellers()
+    sellers_notice = await seller_service.format_recharge_notice()
+    sellers_contact_str = await seller_service.format_sellers_summary()
+    contact_kb = get_seller_contact_keyboard(sellers) if sellers else None
+
     if is_updated:
-        await callback.answer("🔄 Request updated! Please contact @tgekaiva to pay.")
+        await callback.answer(f"🔄 Request updated! Please contact {sellers_contact_str} to pay.")
         await callback.message.edit_text(
             f"🔄 <b>Purchase Request Updated!</b>\n\nYou updated your selection to: <b>{pkg_name}</b>\n\n"
-            "👉 <b>Please message @tgekaiva to complete your payment.</b>\n"
+            f"{sellers_notice}\n"
             "Once payment is confirmed, your account will be upgraded instantly!",
+            reply_markup=contact_kb,
             parse_mode="HTML"
         )
     else:
-        await callback.answer("✅ Request sent! Please contact @tgekaiva to pay.")
+        await callback.answer(f"✅ Request sent! Please contact {sellers_contact_str} to pay.")
         await callback.message.edit_text(
             f"✅ <b>Purchase Request Sent!</b>\n\nYou selected: <b>{pkg_name}</b>\n\n"
-            "👉 <b>Please message @tgekaiva to complete your payment.</b>\n"
+            f"{sellers_notice}\n"
             "Once payment is confirmed, your account will be upgraded instantly!",
+            reply_markup=contact_kb,
             parse_mode="HTML"
         )
 

@@ -15,7 +15,8 @@ from bot.services.user_service import UserService
 from bot.services.plan_service import PlanService
 from bot.services.channel_service import ChannelService
 from bot.services.blacklist_service import BlacklistService
-from bot.models.models import TransactionType, CreditTransaction, User, RechargeStatus, UserStatus, Plan, PlanType, RequiredChannel, Blacklist
+from bot.services.seller_service import SellerService
+from bot.models.models import TransactionType, CreditTransaction, User, RechargeStatus, UserStatus, Plan, PlanType, RequiredChannel, Blacklist, Seller
 from bot.config import config
 from bot.keyboards.inline import (
     get_recharge_approval_keyboard,
@@ -28,11 +29,17 @@ from bot.keyboards.inline import (
     get_channels_delete_keyboard,
     get_admin_blacklist_keyboard,
     get_blacklist_items_keyboard,
+    get_admin_seller_alert_keyboard,
+    get_admin_sellers_keyboard,
+    get_sellers_delete_keyboard,
 )
 import datetime
 
 class AdminStates(StatesGroup):
     pass
+
+class SellerAdminStates(StatesGroup):
+    waiting_for_seller_input = State()
 
 class ChannelAdminStates(StatesGroup):
     waiting_for_channel_input = State()
@@ -1807,6 +1814,164 @@ async def cb_bl_close(callback: CallbackQuery):
     if not is_admin(callback.from_user.id):
         return await callback.answer("Unauthorized.", show_alert=True)
     await callback.message.delete()
+
+
+# ─── ADMIN SELLER HANDLERS ──────────────────────────────────────────────────
+
+async def _build_sellers_dashboard_text(session: AsyncSession) -> str:
+    seller_service = SellerService(session)
+    sellers = await seller_service.get_active_sellers()
+    lines = [
+        "🛍️ <b>RECHARGE SELLER MANAGEMENT</b>",
+        "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━",
+        f"Active Sellers Configured: <b>{len(sellers)}</b>\n"
+    ]
+    if sellers:
+        lines.append("<i>Configured sellers for user payments:</i>")
+        for idx, s in enumerate(sellers, start=1):
+            extra = f" (ID: <code>{s.telegram_id}</code>)" if s.telegram_id else ""
+            name_extra = f" [{s.name}]" if s.name and s.name != s.username else ""
+            lines.append(f"{idx}. 👤 <b>@{s.username}</b>{name_extra}{extra}")
+        lines.append("\n💡 <i>Users requesting recharges will see and message these sellers to pay.</i>")
+    else:
+        lines.append(
+            "⚠️ <b>NO SELLERS CONFIGURED!</b>\n\n"
+            "🛑 <i>The bot is currently <b>PAUSED for regular users</b> and will not reply to them until at least one seller is added!</i>"
+        )
+    return "\n".join(lines)
+
+@router.message(Command("sellers"))
+@router.message(F.text == "🛍️ Manage Sellers")
+async def cmd_manage_sellers(event: Message | CallbackQuery, session: AsyncSession, state: FSMContext):
+    user_id = event.from_user.id
+    if not is_admin(user_id):
+        if isinstance(event, CallbackQuery):
+            await event.answer("Unauthorized.", show_alert=True)
+        return
+
+    await state.clear()
+    text = await _build_sellers_dashboard_text(session)
+    if isinstance(event, CallbackQuery):
+        await event.message.edit_text(text, reply_markup=get_admin_sellers_keyboard(), parse_mode="HTML")
+        await event.answer()
+    else:
+        await event.answer(text, reply_markup=get_admin_sellers_keyboard(), parse_mode="HTML")
+
+@router.callback_query(F.data == "admin_seller_refresh")
+async def cb_sellers_refresh(callback: CallbackQuery, session: AsyncSession, state: FSMContext):
+    if not is_admin(callback.from_user.id):
+        return await callback.answer("Unauthorized.", show_alert=True)
+    await state.clear()
+    text = await _build_sellers_dashboard_text(session)
+    await callback.message.edit_text(text, reply_markup=get_admin_sellers_keyboard(), parse_mode="HTML")
+    await callback.answer("Refreshed!")
+
+@router.callback_query(F.data == "admin_seller_close")
+async def cb_sellers_close(callback: CallbackQuery):
+    if not is_admin(callback.from_user.id):
+        return await callback.answer("Unauthorized.", show_alert=True)
+    await callback.message.delete()
+
+@router.callback_query(F.data == "admin_seller_add")
+async def cb_seller_add_start(callback: CallbackQuery, state: FSMContext):
+    if not is_admin(callback.from_user.id):
+        return await callback.answer("Unauthorized.", show_alert=True)
+
+    await state.set_state(SellerAdminStates.waiting_for_seller_input)
+    text = (
+        "➕ <b>Add Recharge Seller</b>\n"
+        "━━━━━━━━━━━━━━━━━━━━━\n"
+        "Please send the Telegram username of the seller (e.g. <code>@username</code> or <code>username</code>) "
+        "or their numeric Telegram ID.\n\n"
+        "💡 <i>Users will be directed to this person to complete payments for recharges.</i>\n\n"
+        "Send /cancel to abort."
+    )
+    await callback.message.answer(text, parse_mode="HTML")
+    await callback.answer()
+
+@router.message(SellerAdminStates.waiting_for_seller_input)
+async def process_seller_input(message: Message, session: AsyncSession, state: FSMContext):
+    if not is_admin(message.from_user.id):
+        return
+    if not message.text:
+        return await message.answer("⚠️ Please send the seller username or ID as text.")
+
+    text = message.text.strip()
+    if text.startswith("/cancel"):
+        await state.clear()
+        dash_text = await _build_sellers_dashboard_text(session)
+        return await message.answer("❌ Action cancelled.\n\n" + dash_text, reply_markup=get_admin_sellers_keyboard(), parse_mode="HTML")
+
+    seller_service = SellerService(session)
+    success, msg, seller = await seller_service.add_seller(
+        username_or_id=text,
+        created_by=message.from_user.id
+    )
+    await state.clear()
+    dash_text = await _build_sellers_dashboard_text(session)
+    if success:
+        await message.answer(
+            f"✅ {msg}\n"
+            f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+            f"👤 <b>Seller:</b> @{seller.username}\n"
+            f"🚀 <i>The bot is active and users can now contact this seller for recharges!</i>\n\n"
+            + dash_text,
+            reply_markup=get_admin_sellers_keyboard(),
+            parse_mode="HTML"
+        )
+    else:
+        await message.answer(f"⚠️ {msg}\n\n" + dash_text, reply_markup=get_admin_sellers_keyboard(), parse_mode="HTML")
+
+@router.callback_query(F.data == "admin_seller_del_list")
+async def cb_seller_del_list(callback: CallbackQuery, session: AsyncSession, state: FSMContext):
+    if not is_admin(callback.from_user.id):
+        return await callback.answer("Unauthorized.", show_alert=True)
+
+    await state.clear()
+    seller_service = SellerService(session)
+    sellers = await seller_service.get_active_sellers()
+    if not sellers:
+        return await callback.answer("No sellers configured to delete.", show_alert=True)
+
+    text = (
+        "🗑️ <b>Select a seller to remove:</b>\n"
+        "━━━━━━━━━━━━━━━━━━━━━\n"
+        "Tap any seller button below to delete them:"
+    )
+    await callback.message.edit_text(text, reply_markup=get_sellers_delete_keyboard(sellers), parse_mode="HTML")
+    await callback.answer()
+
+@router.callback_query(F.data.startswith("admin_seller_del_"))
+async def cb_seller_delete(callback: CallbackQuery, session: AsyncSession):
+    if not is_admin(callback.from_user.id):
+        return await callback.answer("Unauthorized.", show_alert=True)
+
+    seller_id = int(callback.data.split("_")[3])
+    seller_service = SellerService(session)
+    seller = await seller_service.get_seller_by_id(seller_id)
+    uname = seller.username if seller else f"#{seller_id}"
+
+    deleted = await seller_service.delete_seller(seller_id)
+    if deleted:
+        await callback.answer(f"Deleted @{uname}!")
+    else:
+        await callback.answer("Seller was already deleted.")
+
+    remaining = await seller_service.get_active_sellers()
+    if remaining:
+        text = (
+            f"✅ Removed <b>@{uname}</b> from sellers.\n\n"
+            "🗑️ <b>Select another seller to remove, or go back:</b>"
+        )
+        await callback.message.edit_text(text, reply_markup=get_sellers_delete_keyboard(remaining), parse_mode="HTML")
+    else:
+        dash_text = (
+            f"✅ Removed <b>@{uname}</b>.\n\n"
+            "⚠️ <b>All sellers have been removed!</b>\n"
+            "🛑 <i>The bot is now paused for regular users until a new seller is added.</i>\n\n"
+            + await _build_sellers_dashboard_text(session)
+        )
+        await callback.message.edit_text(dash_text, reply_markup=get_admin_sellers_keyboard(), parse_mode="HTML")
 
 
 

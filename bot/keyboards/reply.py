@@ -24,6 +24,7 @@ def get_main_keyboard(is_admin: bool = False) -> ReplyKeyboardMarkup:
         builder.button(text="📦 Manage Plans")
         builder.button(text="📢 Channels")
         builder.button(text="🚫 Blocklist")
+        builder.button(text="🛍️ Manage Sellers")
     
     # Adjust layout:
     # Row 1: Number Info & Aadhar Info (2)
@@ -32,7 +33,7 @@ def get_main_keyboard(is_admin: bool = False) -> ReplyKeyboardMarkup:
     # Row 4: My Status & Refer & Earn (2)
     # Row 5+: Admin or User utility buttons (2 each)
     if is_admin:
-        builder.adjust(2, 1, 2, 2, 2, 2, 2)
+        builder.adjust(2, 1, 2, 2, 2, 2, 2, 1)
     else:
         builder.adjust(2, 1, 2, 2, 2)
         
