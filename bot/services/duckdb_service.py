@@ -1,14 +1,18 @@
 import os
 import re
+import logging
 import threading
 from concurrent.futures import ThreadPoolExecutor
 import duckdb
 from dotenv import load_dotenv
 
+logger = logging.getLogger(__name__)
+
 _env_path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), ".env")
 load_dotenv(_env_path)
 
 # ── Config ──────────────────────────────────────────────────────────────────
+
 HF_INDEX_BASE = os.environ.get(
     "ICMR_HF_INDEX_BASE",
     "hf://datasets/eKaiva/scrappeddataset"
@@ -61,26 +65,25 @@ def _get_conn():
         if _global_conn is not None:
             return _global_conn
             
-        md_token = os.environ.get("MOTHERDUCK_TOKEN")
+        md_token = (os.environ.get("MOTHERDUCK_TOKEN") or "").strip()
         if not md_token:
-            print("❌ FATAL ERROR: MOTHERDUCK_TOKEN is not set in environment or .env file.")
+            logger.error("MOTHERDUCK_TOKEN is not set in environment or .env file.")
             raise Exception("MOTHERDUCK_TOKEN is missing in environment or .env file.")
 
-        
         try:
-            print("🚀 Connecting to MotherDuck Cloud...")
+            logger.info("Connecting to MotherDuck Cloud...")
             con = duckdb.connect(f"md:?motherduck_token={md_token}")
             
-            hf_token = os.environ.get("HF_TOKEN", "")
+            hf_token = (os.environ.get("HF_TOKEN") or "").strip()
             if hf_token:
                 try:
                     con.execute(f"CREATE OR REPLACE SECRET hf_secret (TYPE HUGGINGFACE, TOKEN '{hf_token}');")
                 except Exception as e:
-                    print(f"Could not set HF secret in MD: {e}")
+                    logger.warning(f"Could not set HF secret in MD: {e}")
                     
             _global_conn = con
             
-            # 🚀 Turbo Settings for Remote Parquet over HTTP
+            # Turbo Settings for Remote Parquet over HTTP
             try:
                 con.execute("SET parquet_metadata_cache = true;")
                 con.execute("SET enable_http_metadata_cache = true;")
@@ -90,15 +93,14 @@ def _get_conn():
                 con.execute("SET http_keep_alive = true;")
                 con.execute("SET http_timeout = 10000;")
                 con.execute("SET http_retries = 3;")
-                print("⚡ DuckDB / MotherDuck HTTP & Parquet turbo flags active!")
+                logger.info("DuckDB / MotherDuck HTTP & Parquet turbo flags active!")
             except Exception as pe:
-                print(f"Notice on DuckDB pragma flags: {pe}")
+                logger.debug(f"Notice on DuckDB pragma flags: {pe}")
 
-            print("✅ MotherDuck successfully connected!")
+            logger.info("MotherDuck successfully connected!")
         except Exception as e:
-            print(f"❌ FATAL ERROR: MotherDuck connection failed: {e}.")
-            print("We are completely disabling local DuckDB fallback to protect Render's 512MB RAM from crashing on the 93GB dataset.")
-            raise Exception("MotherDuck cloud is offline. Refusing to run locally to prevent server crash.")
+            logger.error(f"MotherDuck connection failed: {e}")
+            raise Exception(f"MotherDuck connection error: {e}")
             
     return _global_conn
 
@@ -107,16 +109,16 @@ def warmup_cache():
     try:
         con = _get_conn()
         cur = con.cursor()
-        print("🔥 Pre-warming Parquet chunk footers in background...")
+        logger.info("Pre-warming Parquet chunk footers in background...")
         for i in range(7):
             try:
                 url = f"{HF_INDEX_BASE}/idx_phone.{i}.parquet"
                 cur.execute(f"SELECT phoneNumber FROM read_parquet('{url}') LIMIT 1").fetchall()
             except Exception as e:
-                print(f"Warmup chunk {i} notice: {e}")
-        print("🚀 Parquet chunk footers fully warmed in memory!")
+                logger.debug(f"Warmup chunk {i} notice: {e}")
+        logger.info("Parquet chunk footers fully warmed in memory!")
     except Exception as e:
-        print(f"Warmup notice: {e}")
+        logger.warning(f"Warmup notice: {e}")
 
 def start_background_warmup():
     """Start warmup in a detached daemon thread so bot startup is never blocked."""
@@ -481,7 +483,7 @@ def _run_truecaller_search(field: str, value: str, limit: int = 10) -> list[dict
         cols = [d[0] for d in cursor.description]
         return [dict(zip(cols, r)) for r in rows]
     except Exception as e:
-        print(f"Truecaller search error: {e}")
+        logger.warning(f"Truecaller search error: {e}")
         return []
 
 # ── Chunk List Caching ────────────────────────────────────────────────────────
@@ -497,7 +499,7 @@ def _get_inddata_chunks():
             _inddata_chunks = [f for f in files if f.startswith("chunk_") and f.endswith(".parquet")]
             _inddata_chunks.sort()
         except Exception as e:
-            print(f"HF API Chunk fetch failed: {e}. Falling back to 120 chunks.")
+            logger.warning(f"HF API Chunk fetch failed: {e}. Falling back to 120 chunks.")
             _inddata_chunks = [f"chunk_{i:04d}.parquet" for i in range(1, 121)]
     return _inddata_chunks
 
@@ -596,19 +598,19 @@ def run_sync_search(search_type: str, query: str, limit: int = 10) -> dict:
         try:
             main_data = fut_main.result()
         except Exception as e:
-            print(f"Main field search error: {e}")
+            logger.error(f"Main field search error: {e}")
             main_data = {"field": "phoneNumber", "value": q, "mode": "exact", "count": 0, "results": [], "error": str(e)}
 
         try:
             tc_res = fut_tc.result()
         except Exception as e:
-            print(f"Truecaller search error: {e}")
+            logger.warning(f"Truecaller search error: {e}")
             tc_res = []
 
         try:
             ind_res = fut_ind.result()
         except Exception as e:
-            print(f"Inddata search error: {e}")
+            logger.warning(f"Inddata search error: {e}")
             ind_res = []
 
         # 1. Enrich main_data with Truecaller info
@@ -653,13 +655,13 @@ def run_sync_search(search_type: str, query: str, limit: int = 10) -> dict:
         try:
             tc_res = fut_tc.result()
         except Exception as e:
-            print(f"Truecaller email search error: {e}")
+            logger.warning(f"Truecaller email search error: {e}")
             tc_res = []
 
         try:
             ind_res = fut_ind.result()
         except Exception as e:
-            print(f"Inddata email search error: {e}")
+            logger.warning(f"Inddata email search error: {e}")
             ind_res = []
 
         main_data = {"count": 0, "results": []}
@@ -866,7 +868,7 @@ def run_deep_phone_search(phone: str, limit: int = 10) -> dict:
                     if ro and ro != clean_phone and ro != p:
                         all_alt_numbers.add((ro, f"Secondary SIM ({p}) Application"))
         except Exception as e:
-            print(f"Aadhaar SIMs lookup error: {e}")
+            logger.warning(f"Aadhaar SIMs lookup error: {e}")
 
     # Parallel Hop: Family Lineage & Household Address Matching
     achunks = get_aadhar_chunks(str(aadhar)) if aadhar else [0]
@@ -887,7 +889,7 @@ def run_deep_phone_search(phone: str, limit: int = 10) -> dict:
                 cols = [d[0] for d in cur.description]
                 return [dict(zip(cols, r)) for r in rows]
             except Exception as e:
-                print(f"Family lookup error: {e}")
+                logger.warning(f"Family lookup error: {e}")
                 return []
         parallel_futures["family"] = pool.submit(_find_family)
 
@@ -905,7 +907,7 @@ def run_deep_phone_search(phone: str, limit: int = 10) -> dict:
                 cols = [d[0] for d in cur.description]
                 return [dict(zip(cols, r)) for r in rows]
             except Exception as e:
-                print(f"Household lookup error: {e}")
+                logger.warning(f"Household lookup error: {e}")
                 return []
         parallel_futures["household"] = pool.submit(_find_household)
 
@@ -920,7 +922,7 @@ def run_deep_phone_search(phone: str, limit: int = 10) -> dict:
         try:
             p_results[k] = f.result(timeout=28.0)
         except Exception as e:
-            print(f"Deep pivot {k} error or timeout: {e}")
+            logger.warning(f"Deep pivot {k} error or timeout: {e}")
             p_results[k] = []
 
     # 1. Process Household Co-habitants

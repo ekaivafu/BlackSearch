@@ -2,6 +2,19 @@ import asyncio
 import logging
 import os
 import sys
+
+# Ensure UTF-8 encoding for stdout and stderr to prevent UnicodeEncodeError with emojis/locales
+if hasattr(sys.stdout, "reconfigure"):
+    try:
+        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    except Exception:
+        pass
+if hasattr(sys.stderr, "reconfigure"):
+    try:
+        sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+    except Exception:
+        pass
+
 from dotenv import load_dotenv
 
 # Ensure parent directory is in sys.path so 'import bot...' works anywhere

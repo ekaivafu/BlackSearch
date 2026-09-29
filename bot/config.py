@@ -10,6 +10,8 @@ class Settings(BaseSettings):
     initial_credits: int = Field(5, env="INITIAL_CREDITS")
     default_recharge_amount: int = Field(10, env="DEFAULT_RECHARGE_AMOUNT")
     log_level: str = Field("INFO", env="LOG_LEVEL")
+    motherduck_token: str = Field("", env="MOTHERDUCK_TOKEN")
+    hf_token: str = Field("", env="HF_TOKEN")
 
     @property
     def admin_ids(self) -> List[int]:

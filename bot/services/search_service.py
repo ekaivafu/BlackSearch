@@ -197,7 +197,7 @@ class SearchService:
         
         # 4. Increment total searches
         if is_success:
-            user.total_searches += 1
+            user.total_searches = (user.total_searches or 0) + 1
             
         await self.session.flush()
 
@@ -276,7 +276,7 @@ class SearchService:
         self.session.add(log)
 
         if is_success:
-            user.total_searches += 1
+            user.total_searches = (user.total_searches or 0) + 1
 
         await self.session.flush()
 

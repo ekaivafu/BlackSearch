@@ -895,7 +895,8 @@ async def process_search_input(message: Message, session: AsyncSession, state: F
 
     ADMIN_NAV_BUTTONS = [
         "⚙️ Manage Users", "⚙ Manage Users", "Manage Users",
-        "💰 Manage Points", "📦 Manage Plans", "📢 Channels", "🚫 Blocklist"
+        "💰 Manage Points", "📦 Manage Plans", "📢 Channels", "🚫 Blocklist",
+        "🛍️ Manage Sellers", "🛍 Manage Sellers", "Manage Sellers"
     ]
 
     if query in NAV_ACTIONS:
@@ -908,7 +909,8 @@ async def process_search_input(message: Message, session: AsyncSession, state: F
             btn_manage_points,
             cmd_manage_plans,
             cmd_manage_channels,
-            cmd_blocklist
+            cmd_blocklist,
+            btn_manage_sellers
         )
         admin_actions = {
             "⚙️ Manage Users": lambda: btn_manage_users(message, session),
@@ -918,6 +920,9 @@ async def process_search_input(message: Message, session: AsyncSession, state: F
             "📦 Manage Plans": lambda: cmd_manage_plans(message, session, state),
             "📢 Channels": lambda: cmd_manage_channels(message, session, state),
             "🚫 Blocklist": lambda: cmd_blocklist(message, session, state),
+            "🛍️ Manage Sellers": lambda: btn_manage_sellers(message, session),
+            "🛍 Manage Sellers": lambda: btn_manage_sellers(message, session),
+            "Manage Sellers": lambda: btn_manage_sellers(message, session),
         }
         return await admin_actions[query]()
 
