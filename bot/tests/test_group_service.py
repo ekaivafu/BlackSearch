@@ -139,6 +139,34 @@ async def test_group_control_middleware_ghosting(async_session: AsyncSession):
     assert handler_mock.call_count == 0  # Handler was never reached!
 
 @pytest.mark.asyncio
+async def test_sync_from_required_channels(async_session: AsyncSession):
+    from bot.models.models import RequiredChannel
+    svc = GroupService(async_session)
+
+    # Broadcast channel (not a group)
+    ch1 = RequiredChannel(
+        channel_id=-1001111,
+        title="Broadcast News Channel",
+        invite_link="https://t.me/broadcast",
+        is_active=True
+    )
+    # Discussion group / community
+    ch2 = RequiredChannel(
+        channel_id=-1002222,
+        title="VIP Discussion Group",
+        invite_link="https://t.me/discussion",
+        is_active=True
+    )
+    async_session.add_all([ch1, ch2])
+    await async_session.flush()
+
+    synced = await svc.sync_from_required_channels(bot=None)
+    # Should only sync the group, excluding the broadcast channel!
+    synced_ids = [g.chat_id for g in synced]
+    assert -1002222 in synced_ids
+    assert -1001111 not in synced_ids
+
+@pytest.mark.asyncio
 async def test_admin_groups_keyboard(async_session: AsyncSession):
     svc = GroupService(async_session)
     g1 = await svc.get_or_create_group(chat_id=-101, title="Alpha Group")
@@ -148,10 +176,13 @@ async def test_admin_groups_keyboard(async_session: AsyncSession):
     groups = await svc.get_all_groups()
     kb = get_admin_groups_keyboard(groups, page=1)
     assert kb is not None
-    # Verify button texts include status indicators
     buttons_text = [btn.text for row in kb.inline_keyboard for btn in row]
     assert any("🟢 Alpha Group (ON)" in b for b in buttons_text)
     assert any("🔴 Beta Group (OFF/Ghost)" in b for b in buttons_text)
     assert "⚡ Turn ALL ON" in buttons_text
     assert "👻 Ghost ALL (OFF)" in buttons_text
-    assert "➕ Add Group ID" in buttons_text
+    assert "🔄 Refresh" in buttons_text
+    assert "🔙 Dashboard" in buttons_text
+    # "➕ Add Group ID" must NOT be in buttons
+    assert not any("➕ Add" in b for b in buttons_text)
+

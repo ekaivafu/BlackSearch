@@ -1,8 +1,8 @@
 import logging
-from typing import Optional, List, Tuple, Dict
+from typing import Optional, List, Tuple, Dict, Any
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, delete, func, update
-from bot.models.models import ManagedGroup
+from bot.models.models import ManagedGroup, RequiredChannel
 
 logger = logging.getLogger(__name__)
 
@@ -32,6 +32,63 @@ class GroupService:
     def clear_cache(cls) -> None:
         """Clears all cached group statuses."""
         _GROUP_STATUS_CACHE.clear()
+
+    async def sync_from_required_channels(self, bot: Optional[Any] = None) -> List[ManagedGroup]:
+        """
+        Syncs groups/supergroups configured in RequiredChannel into ManagedGroup.
+        Only syncs items that are groups/supergroups (NOT broadcast channels).
+        Preserves existing ON/OFF (is_active) settings for already registered groups.
+        """
+        stmt = select(RequiredChannel).where(RequiredChannel.is_active == True)
+        res = await self.session.execute(stmt)
+        req_channels = list(res.scalars().all())
+
+        valid_group_chat_ids = set()
+
+        for rc in req_channels:
+            is_group = False
+            if bot:
+                try:
+                    chat = await bot.get_chat(rc.channel_id)
+                    if getattr(chat, "type", None) in ("group", "supergroup"):
+                        is_group = True
+                except Exception as e:
+                    logger.debug(f"Could not fetch chat {rc.channel_id} via bot: {e}")
+
+            # Heuristic fallback if bot query was not run or didn't return
+            if not is_group:
+                title_lower = (rc.title or "").lower()
+                if any(w in title_lower for w in ("group", "community", "chat")):
+                    is_group = True
+
+            if is_group:
+                valid_group_chat_ids.add(rc.channel_id)
+                group = await self.get_group_by_chat_id(rc.channel_id)
+                if not group:
+                    group = ManagedGroup(
+                        chat_id=rc.channel_id,
+                        title=rc.title,
+                        username=rc.username.lstrip("@") if rc.username else None,
+                        is_active=True
+                    )
+                    self.session.add(group)
+                    await self.session.flush()
+                else:
+                    if rc.title and group.title != rc.title:
+                        group.title = rc.title
+                        await self.session.flush()
+                self.set_cached_group_status(group.chat_id, group.is_active)
+
+        if valid_group_chat_ids:
+            stmt_mg = select(ManagedGroup).where(ManagedGroup.chat_id.in_(valid_group_chat_ids)).order_by(ManagedGroup.id.asc())
+            res_mg = await self.session.execute(stmt_mg)
+            groups = list(res_mg.scalars().all())
+        else:
+            groups = await self.get_all_groups()
+
+        for g in groups:
+            self.set_cached_group_status(g.chat_id, g.is_active)
+        return groups
 
     async def get_all_groups(self) -> List[ManagedGroup]:
         """Fetch all managed groups sorted by ID."""

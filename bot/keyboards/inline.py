@@ -265,17 +265,11 @@ def get_admin_groups_keyboard(groups: list, page: int = 1, page_size: int = 6) -
             builder.button(text="·", callback_data="noop")
         adjust_pattern.append(3)
 
-    # Bulk actions and utility buttons
-    builder.button(text="⚡ Turn ALL ON", callback_data="grp_all_on")
-    builder.button(text="👻 Ghost ALL (OFF)", callback_data="grp_all_off")
-    adjust_pattern.append(2)
-
-    builder.button(text="➕ Add Group ID", callback_data="grp_add_start")
-    if groups:
-        builder.button(text="🗑️ Remove Group", callback_data="grp_del_list")
+    # Bulk actions if multiple groups exist
+    if total_groups > 1:
+        builder.button(text="⚡ Turn ALL ON", callback_data="grp_all_on")
+        builder.button(text="👻 Ghost ALL (OFF)", callback_data="grp_all_off")
         adjust_pattern.append(2)
-    else:
-        adjust_pattern.append(1)
 
     builder.button(text="🔄 Refresh", callback_data=f"grp_page_{page}")
     builder.button(text="🔙 Dashboard", callback_data="admin_dashboard_refresh")

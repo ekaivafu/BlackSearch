@@ -925,10 +925,10 @@ async def process_search_input(message: Message, session: AsyncSession, state: F
             "🛍️ Manage Sellers": lambda: btn_manage_sellers(message, session),
             "🛍 Manage Sellers": lambda: btn_manage_sellers(message, session),
             "Manage Sellers": lambda: btn_manage_sellers(message, session),
-            "👥 Manage Groups": lambda: cmd_manage_groups(message, session, state),
-            "👥 Groups": lambda: cmd_manage_groups(message, session, state),
-            "Manage Groups": lambda: cmd_manage_groups(message, session, state),
-            "Groups": lambda: cmd_manage_groups(message, session, state),
+            "👥 Manage Groups": lambda: cmd_manage_groups(message, session, state, bot),
+            "👥 Groups": lambda: cmd_manage_groups(message, session, state, bot),
+            "Manage Groups": lambda: cmd_manage_groups(message, session, state, bot),
+            "Groups": lambda: cmd_manage_groups(message, session, state, bot),
         }
         return await admin_actions[query]()
 

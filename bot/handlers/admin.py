@@ -1,6 +1,6 @@
 import asyncio
 import logging
-from typing import Tuple
+from typing import Tuple, Optional
 import html
 from aiogram import Router, F, Bot
 
@@ -40,9 +40,6 @@ import datetime
 
 class AdminStates(StatesGroup):
     pass
-
-class GroupAdminStates(StatesGroup):
-    waiting_for_group_input = State()
 
 class SellerAdminStates(StatesGroup):
     waiting_for_seller_input = State()
@@ -228,13 +225,16 @@ def get_admin_dashboard_keyboard(pending_recharge_count: int = 0) -> InlineKeybo
     return builder.as_markup()
 
 
-async def _build_admin_dashboard_text(session: AsyncSession) -> Tuple[str, int]:
+async def _build_admin_dashboard_text(session: AsyncSession, bot: Optional[Bot] = None) -> Tuple[str, int]:
     user_service = UserService(session)
     group_service = GroupService(session)
     pending_recharges = await user_service.get_pending_recharges()
     pending_users = await user_service.get_pending_users()
     stats = await user_service.get_stats()
-    group_stats = await group_service.get_stats()
+    groups = await group_service.sync_from_required_channels(bot)
+    total_grp = len(groups)
+    active_grp = sum(1 for g in groups if g.is_active)
+    ghost_grp = total_grp - active_grp
 
     recharge_count = len(pending_recharges)
     user_count = len(pending_users)
@@ -247,7 +247,7 @@ async def _build_admin_dashboard_text(session: AsyncSession) -> Tuple[str, int]:
         f"✅ <b>Approved Users:</b> <code>{stats.get('approved_users', 0)}</code>",
         f"🚫 <b>Banned Users:</b> <code>{stats.get('banned_users', 0)}</code>",
         f"👑 <b>Active Unlimited Passes:</b> <code>{stats.get('active_subs', 0)}</code>",
-        f"👥 <b>Tracked Groups:</b> <code>{group_stats.get('total', 0)}</code> (🟢 {group_stats.get('active', 0)} active, 🔴 {group_stats.get('ghosted', 0)} ghosted)",
+        f"👥 <b>Tracked Groups:</b> <code>{total_grp}</code> (🟢 {active_grp} active, 🔴 {ghost_grp} ghosted)",
         f"🔍 <b>Total Searches Run:</b> <code>{stats.get('total_searches', 0)}</code>",
         f"🪙 <b>Floating Credits:</b> <code>{stats.get('total_credits', 0)}</code>\n",
     ]
@@ -281,19 +281,19 @@ async def _build_admin_dashboard_text(session: AsyncSession) -> Tuple[str, int]:
 
 
 @router.message(Command("admin"))
-async def cmd_admin(message: Message, session: AsyncSession):
+async def cmd_admin(message: Message, session: AsyncSession, bot: Bot):
     if not is_admin(message.from_user.id):
         return await message.answer("Unauthorized.")
     
-    text, recharge_count = await _build_admin_dashboard_text(session)
+    text, recharge_count = await _build_admin_dashboard_text(session, bot=bot)
     await message.answer(text, reply_markup=get_admin_dashboard_keyboard(recharge_count), parse_mode="HTML")
 
 
 @router.callback_query(F.data == "admin_dashboard_refresh")
-async def cb_admin_dashboard_refresh(callback: CallbackQuery, session: AsyncSession):
+async def cb_admin_dashboard_refresh(callback: CallbackQuery, session: AsyncSession, bot: Bot):
     if not is_admin(callback.from_user.id):
         return await callback.answer("Unauthorized.", show_alert=True)
-    text, recharge_count = await _build_admin_dashboard_text(session)
+    text, recharge_count = await _build_admin_dashboard_text(session, bot=bot)
     try:
         await callback.message.edit_text(text, reply_markup=get_admin_dashboard_keyboard(recharge_count), parse_mode="HTML")
         await callback.answer("Dashboard refreshed! 🔄")
@@ -1986,40 +1986,39 @@ async def cb_seller_delete(callback: CallbackQuery, session: AsyncSession):
 
 # ─── ADMIN GROUP MANAGEMENT & GHOST CONTROL ──────────────────────────────────
 
-async def _build_groups_dashboard_text(session: AsyncSession) -> Tuple[str, list]:
+async def _build_groups_dashboard_text(session: AsyncSession, bot: Optional[Bot] = None) -> Tuple[str, list]:
     group_service = GroupService(session)
-    groups = await group_service.get_all_groups()
-    stats = await group_service.get_stats()
+    groups = await group_service.sync_from_required_channels(bot)
 
-    total = stats.get("total", 0)
-    active = stats.get("active", 0)
-    ghosted = stats.get("ghosted", 0)
+    total = len(groups)
+    active = sum(1 for g in groups if g.is_active)
+    ghosted = total - active
 
     lines = [
         "👥 <b>Group Management & Ghost Control</b>",
         "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━",
-        "📊 <b>Network Statistics:</b>",
-        f"├ 👥 <b>Total Managed Groups:</b> <code>{total}</code>",
+        "📊 <b>Configured Groups:</b>",
+        f"├ 👥 <b>Total Groups:</b> <code>{total}</code>",
         f"├ 🟢 <b>Active (Replying):</b> <code>{active}</code>",
         f"└ 🔴 <b>Ghosted (Silent):</b> <code>{ghosted}</code>\n",
         "💡 <b>Ghost Control Policy:</b>",
         "• <b>🟢 ON:</b> Bot monitors chat and replies to member queries as usual.",
         "• <b>🔴 OFF (Ghost Mode):</b> Bot completely ignores this group. It stays 100% silent and will <b>never</b> reply or trigger searches there.",
-        "• Tap any group below to toggle between <b>ON</b> and <b>OFF</b>.",
+        "• Tap any group button below to toggle between <b>ON</b> and <b>OFF</b>.",
         "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━",
     ]
 
     if not groups:
-        lines.append("<i>⚠️ No groups registered yet. Add the bot to a group or click ➕ Add Group ID below!</i>")
+        lines.append("<i>⚠️ No groups configured in bot requirements yet. Add your group in 📢 Channels!</i>")
     else:
-        lines.append("👇 <b>Select a group to toggle status:</b>")
+        lines.append("👇 <b>Tap a group button to toggle its status:</b>")
 
     return "\n".join(lines), groups
 
 @router.message(Command("groups"))
 @router.message(Command("managegroups"))
 @router.message(F.text.in_({"👥 Manage Groups", "👥 Groups", "Manage Groups", "Groups"}))
-async def cmd_manage_groups(event: Message | CallbackQuery, session: AsyncSession, state: FSMContext, page: int = 1):
+async def cmd_manage_groups(event: Message | CallbackQuery, session: AsyncSession, state: FSMContext, bot: Bot, page: int = 1):
     user_id = event.from_user.id
     if not is_admin(user_id):
         if isinstance(event, CallbackQuery):
@@ -2027,7 +2026,7 @@ async def cmd_manage_groups(event: Message | CallbackQuery, session: AsyncSessio
         return
 
     await state.clear()
-    text, groups = await _build_groups_dashboard_text(session)
+    text, groups = await _build_groups_dashboard_text(session, bot=bot)
     reply_markup = get_admin_groups_keyboard(groups, page=page)
 
     if isinstance(event, CallbackQuery):
@@ -2040,23 +2039,23 @@ async def cmd_manage_groups(event: Message | CallbackQuery, session: AsyncSessio
         await event.answer(text, reply_markup=reply_markup, parse_mode="HTML")
 
 @router.callback_query(F.data == "admin_groups_open")
-async def cb_admin_groups_open(callback: CallbackQuery, session: AsyncSession, state: FSMContext):
+async def cb_admin_groups_open(callback: CallbackQuery, session: AsyncSession, state: FSMContext, bot: Bot):
     if not is_admin(callback.from_user.id):
         return await callback.answer("Unauthorized.", show_alert=True)
-    await cmd_manage_groups(callback, session, state, page=1)
+    await cmd_manage_groups(callback, session, state, bot=bot, page=1)
 
 @router.callback_query(F.data.startswith("grp_page_"))
-async def cb_groups_page(callback: CallbackQuery, session: AsyncSession, state: FSMContext):
+async def cb_groups_page(callback: CallbackQuery, session: AsyncSession, state: FSMContext, bot: Bot):
     if not is_admin(callback.from_user.id):
         return await callback.answer("Unauthorized.", show_alert=True)
     try:
         page = int(callback.data.split("_")[2])
     except Exception:
         page = 1
-    await cmd_manage_groups(callback, session, state, page=page)
+    await cmd_manage_groups(callback, session, state, bot=bot, page=page)
 
 @router.callback_query(F.data.startswith("grp_tog_"))
-async def cb_group_toggle(callback: CallbackQuery, session: AsyncSession, state: FSMContext):
+async def cb_group_toggle(callback: CallbackQuery, session: AsyncSession, state: FSMContext, bot: Bot):
     if not is_admin(callback.from_user.id):
         return await callback.answer("Unauthorized.", show_alert=True)
 
@@ -2076,136 +2075,27 @@ async def cb_group_toggle(callback: CallbackQuery, session: AsyncSession, state:
         toast = f"🔴 '{group.title}' is now GHOSTED! Bot is silent."
 
     await callback.answer(toast, show_alert=False)
-    await cmd_manage_groups(callback, session, state, page=page)
+    await cmd_manage_groups(callback, session, state, bot=bot, page=page)
 
 @router.callback_query(F.data == "grp_all_on")
-async def cb_groups_all_on(callback: CallbackQuery, session: AsyncSession, state: FSMContext):
+async def cb_groups_all_on(callback: CallbackQuery, session: AsyncSession, state: FSMContext, bot: Bot):
     if not is_admin(callback.from_user.id):
         return await callback.answer("Unauthorized.", show_alert=True)
 
     group_service = GroupService(session)
     count = await group_service.set_all_groups_status(True)
     await callback.answer(f"⚡ All {count} group(s) turned ON! Bot will reply.", show_alert=False)
-    await cmd_manage_groups(callback, session, state, page=1)
+    await cmd_manage_groups(callback, session, state, bot=bot, page=1)
 
 @router.callback_query(F.data == "grp_all_off")
-async def cb_groups_all_off(callback: CallbackQuery, session: AsyncSession, state: FSMContext):
+async def cb_groups_all_off(callback: CallbackQuery, session: AsyncSession, state: FSMContext, bot: Bot):
     if not is_admin(callback.from_user.id):
         return await callback.answer("Unauthorized.", show_alert=True)
 
     group_service = GroupService(session)
     count = await group_service.set_all_groups_status(False)
     await callback.answer(f"👻 All {count} group(s) turned OFF (Ghost Mode)! Bot is silent.", show_alert=False)
-    await cmd_manage_groups(callback, session, state, page=1)
-
-@router.callback_query(F.data == "grp_del_list")
-async def cb_groups_del_list(callback: CallbackQuery, session: AsyncSession, state: FSMContext):
-    if not is_admin(callback.from_user.id):
-        return await callback.answer("Unauthorized.", show_alert=True)
-
-    await state.clear()
-    group_service = GroupService(session)
-    groups = await group_service.get_all_groups()
-    if not groups:
-        return await callback.answer("No groups registered to delete.", show_alert=True)
-
-    text = (
-        "🗑️ <b>Select a group to remove from tracking:</b>\n"
-        "━━━━━━━━━━━━━━━━━━━━━\n"
-        "Tap any group button below to remove it from the system:"
-    )
-    await callback.message.edit_text(text, reply_markup=get_groups_delete_keyboard(groups), parse_mode="HTML")
-    await callback.answer()
-
-@router.callback_query(F.data.startswith("grp_del_"))
-async def cb_group_delete(callback: CallbackQuery, session: AsyncSession, state: FSMContext):
-    if not is_admin(callback.from_user.id):
-        return await callback.answer("Unauthorized.", show_alert=True)
-
-    group_id = int(callback.data.split("_")[2])
-    group_service = GroupService(session)
-    deleted, title = await group_service.delete_group(group_id)
-
-    if deleted:
-        await callback.answer(f"Deleted '{title}' from tracking!")
-    else:
-        await callback.answer("Group was already deleted.")
-
-    remaining = await group_service.get_all_groups()
-    if remaining:
-        text = (
-            f"✅ Removed <b>{html.escape(title)}</b> from managed groups.\n\n"
-            "🗑️ <b>Select another group to remove, or go back:</b>"
-        )
-        await callback.message.edit_text(text, reply_markup=get_groups_delete_keyboard(remaining), parse_mode="HTML")
-    else:
-        await cmd_manage_groups(callback, session, state, page=1)
-
-@router.callback_query(F.data == "grp_add_start")
-async def cb_group_add_start(callback: CallbackQuery, state: FSMContext):
-    if not is_admin(callback.from_user.id):
-        return await callback.answer("Unauthorized.", show_alert=True)
-
-    await state.set_state(GroupAdminStates.waiting_for_group_input)
-    text = (
-        "➕ <b>Add Group by Chat ID</b>\n"
-        "━━━━━━━━━━━━━━━━━━━━━\n"
-        "Please send the numeric <b>Telegram Chat ID</b> of the group, optionally followed by the group title.\n\n"
-        "👉 <i>Example: <code>-100192837465 VIP Private Group</code></i>\n"
-        "👉 <i>Or just the Chat ID: <code>-100192837465</code></i>\n\n"
-        "💡 <i>Tip: The bot also automatically registers any group as soon as it is added or receives a message there!</i>\n\n"
-        "Send /cancel to abort."
-    )
-    await callback.message.answer(text, parse_mode="HTML")
-    await callback.answer()
-
-@router.message(GroupAdminStates.waiting_for_group_input)
-async def process_group_input(message: Message, session: AsyncSession, state: FSMContext):
-    if not is_admin(message.from_user.id):
-        return
-    if not message.text:
-        return await message.answer("⚠️ Please send the group Chat ID as text.")
-
-    text = message.text.strip()
-    if text.startswith("/cancel"):
-        await state.clear()
-        return await cmd_manage_groups(message, session, state, page=1)
-
-    parts = text.split(maxsplit=1)
-    raw_id = parts[0].strip()
-    title = parts[1].strip() if len(parts) > 1 else f"Group {raw_id}"
-
-    # Validate numeric chat ID (can be negative for groups)
-    try:
-        chat_id = int(raw_id)
-    except ValueError:
-        return await message.answer(
-            "⚠️ <b>Invalid Chat ID!</b>\n\n"
-            "Chat ID must be a valid number (e.g. <code>-1001234567890</code>).\n"
-            "Please try again or send /cancel to abort.",
-            parse_mode="HTML"
-        )
-
-    group_service = GroupService(session)
-    success, msg, group = await group_service.add_group_manual(
-        chat_id=chat_id,
-        title=title,
-        added_by=message.from_user.id
-    )
-    await state.clear()
-    if success:
-        await message.answer(
-            f"✅ {msg}\n"
-            f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-            f"👥 <b>Group:</b> {html.escape(group.title)}\n"
-            f"🆔 <b>Chat ID:</b> <code>{group.chat_id}</code>\n"
-            f"⚡ <b>Status:</b> 🟢 ACTIVE (Replying)\n",
-            parse_mode="HTML"
-        )
-    else:
-        await message.answer(f"⚠️ {msg}", parse_mode="HTML")
-
-    await cmd_manage_groups(message, session, state, page=1)
+    await cmd_manage_groups(callback, session, state, bot=bot, page=1)
 
 @router.my_chat_member()
 async def on_my_chat_member_update(event: ChatMemberUpdated, session: AsyncSession):
