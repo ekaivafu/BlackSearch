@@ -26,6 +26,7 @@ from aiogram.fsm.storage.memory import MemoryStorage
 from bot.config import config
 from bot.database.session import async_session, init_db
 from bot.middleware.db import DbSessionMiddleware
+from bot.middleware.group_control import GroupControlMiddleware
 from bot.middleware.auth import ThrottlingMiddleware
 from bot.middleware.forcesub import ForceSubMiddleware
 from bot.middleware.daily_bonus import DailyBonusMiddleware
@@ -60,6 +61,8 @@ async def main():
     
     # Middlewares
     dp.update.middleware(DbSessionMiddleware(async_session))
+    dp.message.middleware(GroupControlMiddleware())
+    dp.callback_query.middleware(GroupControlMiddleware())
     dp.message.middleware(ThrottlingMiddleware(limit_seconds=1.0))
     dp.message.middleware(SellerCheckMiddleware())
     dp.callback_query.middleware(SellerCheckMiddleware())

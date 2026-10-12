@@ -221,3 +221,78 @@ def get_seller_contact_keyboard(sellers: list) -> InlineKeyboardMarkup:
     builder.adjust(1)
     return builder.as_markup()
 
+# ─── ADMIN GROUP MANAGEMENT KEYBOARDS ────────────────────────────────────────
+
+def get_admin_groups_keyboard(groups: list, page: int = 1, page_size: int = 6) -> InlineKeyboardMarkup:
+    """
+    Renders the group management keyboard.
+    Each group has a toggle button with green (ON) or red (OFF/Ghost) indicator.
+    Supports pagination and bulk controls.
+    """
+    builder = InlineKeyboardBuilder()
+
+    total_groups = len(groups)
+    total_pages = max(1, (total_groups + page_size - 1) // page_size) if total_groups > 0 else 1
+    page = max(1, min(page, total_pages))
+
+    start_idx = (page - 1) * page_size
+    page_groups = groups[start_idx:start_idx + page_size]
+
+    for g in page_groups:
+        raw_title = g.title or f"Group #{g.id}"
+        # Keep title within readable length
+        display_title = raw_title if len(raw_title) <= 22 else f"{raw_title[:20]}…"
+        if g.is_active:
+            btn_text = f"🟢 {display_title} (ON)"
+        else:
+            btn_text = f"🔴 {display_title} (OFF/Ghost)"
+        builder.button(text=btn_text, callback_data=f"grp_tog_{g.id}_{page}")
+
+    # Layout group toggle buttons 1 per row for maximum readability
+    group_buttons_count = len(page_groups)
+    adjust_pattern = [1] * group_buttons_count
+
+    # Pagination row if multiple pages exist
+    if total_pages > 1:
+        if page > 1:
+            builder.button(text="◀️ Prev", callback_data=f"grp_page_{page - 1}")
+        else:
+            builder.button(text="·", callback_data="noop")
+        builder.button(text=f"📄 {page}/{total_pages}", callback_data="noop")
+        if page < total_pages:
+            builder.button(text="Next ▶️", callback_data=f"grp_page_{page + 1}")
+        else:
+            builder.button(text="·", callback_data="noop")
+        adjust_pattern.append(3)
+
+    # Bulk actions and utility buttons
+    builder.button(text="⚡ Turn ALL ON", callback_data="grp_all_on")
+    builder.button(text="👻 Ghost ALL (OFF)", callback_data="grp_all_off")
+    adjust_pattern.append(2)
+
+    builder.button(text="➕ Add Group ID", callback_data="grp_add_start")
+    if groups:
+        builder.button(text="🗑️ Remove Group", callback_data="grp_del_list")
+        adjust_pattern.append(2)
+    else:
+        adjust_pattern.append(1)
+
+    builder.button(text="🔄 Refresh", callback_data=f"grp_page_{page}")
+    builder.button(text="🔙 Dashboard", callback_data="admin_dashboard_refresh")
+    adjust_pattern.append(2)
+
+    builder.adjust(*adjust_pattern)
+    return builder.as_markup()
+
+def get_groups_delete_keyboard(groups: list) -> InlineKeyboardMarkup:
+    """Renders keyboard to pick a group to delete from tracking."""
+    builder = InlineKeyboardBuilder()
+    for g in groups:
+        raw_title = g.title or f"Group #{g.id}"
+        display_title = raw_title if len(raw_title) <= 25 else f"{raw_title[:23]}…"
+        builder.button(text=f"🗑️ {display_title}", callback_data=f"grp_del_{g.id}")
+    builder.button(text="🔙 Back to Groups", callback_data="admin_groups_open")
+    builder.adjust(1)
+    return builder.as_markup()
+
+

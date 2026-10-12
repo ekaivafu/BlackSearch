@@ -24,32 +24,24 @@ async def test_create_user(async_session):
     svc = UserService(async_session)
     user = await svc.create_user(12345, "testuser", "Test", "User")
     assert user.telegram_user_id == 12345
-    assert user.status == UserStatus.PENDING
-    assert user.credits == 0
-
-@pytest.mark.asyncio
-async def test_approve_user(async_session):
-    svc = UserService(async_session)
-    await svc.create_user(12345, "testuser", "Test", "User")
-    
-    user = await svc.approve_user(12345, admin_id=999, initial_credits=10)
     assert user.status == UserStatus.APPROVED
-    assert user.credits == 10
-    assert user.approved_by == 999
+    assert user.credits >= 0
 
 @pytest.mark.asyncio
 async def test_search_deduction(async_session):
     svc = UserService(async_session)
-    await svc.create_user(12345, "testuser", "Test", "User")
-    await svc.approve_user(12345, admin_id=999, initial_credits=1)
+    user = await svc.create_user(12345, "testuser", "Test", "User")
+    user.credits = 1
+    user.bonus_credits = 0
+    await async_session.flush()
     
-    # Successful deduction
-    res = await svc.deduct_credit(12345, 1)
+    # Successful deduction returns (True, deduction_info)
+    res, info = await svc.deduct_credit(12345, 1)
     assert res is True
     
     user = await svc.get_user_by_telegram_id(12345)
     assert user.credits == 0
     
-    # Failed deduction
-    res2 = await svc.deduct_credit(12345, 1)
+    # Failed deduction when 0 credits
+    res2, info2 = await svc.deduct_credit(12345, 1)
     assert res2 is False

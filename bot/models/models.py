@@ -177,3 +177,17 @@ class Seller(Base):
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     created_by = Column(BigInteger, nullable=True)  # Telegram ID of admin who added
 
+class ManagedGroup(Base):
+    __tablename__ = "managed_groups"
+
+    id = Column(Integer, primary_key=True, index=True)
+    chat_id = Column(BigInteger, unique=True, index=True, nullable=False)
+    title = Column(String(255), nullable=False)
+    username = Column(String(100), nullable=True)
+    is_active = Column(Boolean, default=True, nullable=False)  # True = Active (replying), False = Ghost mode (silent)
+    member_count = Column(Integer, nullable=True)
+    added_by = Column(BigInteger, nullable=True)  # Telegram ID of user/admin who added bot
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    updated_at = Column(DateTime(timezone=True), onupdate=func.now())
+
+

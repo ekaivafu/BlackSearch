@@ -71,6 +71,18 @@ async def init_db():
                         created_by BIGINT
                     );
                     CREATE INDEX IF NOT EXISTS ix_sellers_username ON sellers (username);
+                    CREATE TABLE IF NOT EXISTS managed_groups (
+                        id SERIAL PRIMARY KEY,
+                        chat_id BIGINT NOT NULL UNIQUE,
+                        title VARCHAR(255) NOT NULL,
+                        username VARCHAR(100),
+                        is_active BOOLEAN DEFAULT TRUE,
+                        member_count INTEGER,
+                        added_by BIGINT,
+                        created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+                        updated_at TIMESTAMP WITH TIME ZONE
+                    );
+                    CREATE INDEX IF NOT EXISTS ix_managed_groups_chat_id ON managed_groups (chat_id);
                 """))
             except Exception:
                 pass
